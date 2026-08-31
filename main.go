@@ -941,9 +941,9 @@ func managementHandle(raw []byte) ([]byte, error) {
 	var resp pluginapi.ManagementResponse
 	path := strings.TrimRight(req.Path, "/")
 	switch {
-	case path == authAccountPath:
+	case strings.HasSuffix(path, authAccountPath):
 		resp, _ = managementAuthAccount(context.Background(), pluginReq)
-	case path == accountsPath:
+	case strings.HasSuffix(path, accountsPath):
 		if req.Method == http.MethodGet {
 			resp, _ = managementAccounts(context.Background(), pluginReq)
 		} else if req.Method == http.MethodPut {
