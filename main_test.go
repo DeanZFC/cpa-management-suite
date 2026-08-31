@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -228,5 +229,39 @@ func TestFullPoolReturns429WhenConfigured(t *testing.T) {
 	}
 	if env.OK || env.Error == nil || env.Error.HTTPStatus != http.StatusTooManyRequests {
 		t.Fatalf("envelope = %#v", env)
+	}
+}
+
+func TestAuthMetadataEditingPreservesCredentialsAndUpdatesCPAFields(t *testing.T) {
+	metadata, err := authMetadata(json.RawMessage(`{"type":"codex","email":"user@example.com","refresh_token":"secret"}`))
+	if err != nil {
+		t.Fatal(err)
+	}
+	priority := 7
+	websockets := true
+	usingAPI := false
+	applyAuthMetadata(metadata, authAccountRequest{
+		ProxyURL:   "http://127.0.0.1:9000",
+		BaseURL:    "https://api.example.com",
+		Note:       "production",
+		Priority:   &priority,
+		Websockets: &websockets,
+		UsingAPI:   &usingAPI,
+	}, true)
+	if metadata["refresh_token"] != "secret" || metadata["proxy-url"] != "http://127.0.0.1:9000" || metadata["base-url"] != "https://api.example.com" {
+		t.Fatalf("metadata lost credential or fields: %#v", metadata)
+	}
+	if metadata["priority"] != priority || metadata["websockets"] != websockets || metadata["using-api"] != usingAPI {
+		t.Fatalf("metadata fields = %#v", metadata)
+	}
+}
+
+func TestGeneratedAuthFileNameIsSafeAndJSON(t *testing.T) {
+	name := generatedAuthFileName(map[string]any{"type": "codex", "email": "user@example.com"})
+	if !strings.HasPrefix(name, "codex-userexample.com-") || !strings.HasSuffix(name, ".json") {
+		t.Fatalf("generated name = %q", name)
+	}
+	if strings.ContainsAny(name, "/\\") {
+		t.Fatalf("generated name contains path separator: %q", name)
 	}
 }

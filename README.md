@@ -8,6 +8,8 @@
 - 请求经过实际账号选择后绑定账号，在成功、失败、拒绝和取消时释放并发。
 - 通过 `usage.handle` 按 CPA 提供的 `AuthID` 累计请求和 Token。
 - 管理页面可编辑容量、启用/停用账号、清空统计。
+- 管理页面可直接新增和编辑 CPA 认证账号：支持粘贴或选择 JSON 文件，并编辑显示名称、代理、Base URL、优先级、备注、WebSocket 和 API 模式。
+- 新增/编辑通过 CPA SDK 的 `host.auth.save` 和 `host.auth.get` 完成，保存后由 CPA 自动重新加载认证文件。
 - 状态 JSON 和价格快照原子写入，放在插件挂载目录中，容器更新不会丢失。
 - 费用规则参考 CPA Usage Keeper：从 Models.dev 同步模型价格，分别计算普通输入、缓存读取、缓存写入和输出。
 
@@ -102,6 +104,18 @@ cd /root/cpa-2 && sudo docker compose up -d --force-recreate cli-proxy-api
 ```
 
 页面中的修改操作填写对应这一套 CPA 的 `CPA Management Key`。两套 CPA 使用各自的 `config.yaml`、插件状态文件和管理密钥，互不影响。
+
+账号管理接口：
+
+```text
+GET  /v0/management/account-capacity/accounts
+PUT  /v0/management/account-capacity/accounts              # 容量、启停和标签
+POST /v0/management/account-capacity/accounts/auth         # 新增认证文件
+GET  /v0/management/account-capacity/accounts/auth         # 按 auth_index 读取认证文件
+PUT  /v0/management/account-capacity/accounts/auth         # 编辑并覆盖认证文件
+```
+
+当前 CPA 插件 SDK 没有提供删除认证文件的 `host.auth.delete` 回调，因此页面的“停用”是安全的逻辑停用；不会提供可能造成误删的伪删除按钮。物理删除仍应使用 CPA 自带的认证文件管理页面。
 
 ## 注意
 

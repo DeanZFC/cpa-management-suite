@@ -65,11 +65,12 @@ import (
 )
 
 const (
-	pluginID       = "cpa-management-suite"
-	pluginVersion  = "0.1.0"
-	dashboardPath  = "/dashboard"
-	accountsPath   = "/account-capacity/accounts"
-	resetUsagePath = "/account-capacity/reset-usage"
+	pluginID        = "cpa-management-suite"
+	pluginVersion   = "0.2.0"
+	dashboardPath   = "/dashboard"
+	accountsPath    = "/account-capacity/accounts"
+	authAccountPath = "/account-capacity/accounts/auth"
+	resetUsagePath  = "/account-capacity/reset-usage"
 )
 
 type envelope struct {
@@ -236,6 +237,22 @@ type accountUpdate struct {
 	Label    string `json:"label"`
 }
 
+type authAccountRequest struct {
+	AuthIndex  string            `json:"auth_index"`
+	Name       string            `json:"name"`
+	JSON       json.RawMessage   `json:"json"`
+	Capacity   int               `json:"capacity"`
+	Enabled    *bool             `json:"enabled"`
+	Label      string            `json:"label"`
+	ProxyURL   string            `json:"proxy_url"`
+	BaseURL    string            `json:"base_url"`
+	Note       string            `json:"note"`
+	Priority   *int              `json:"priority"`
+	Websockets *bool             `json:"websockets"`
+	UsingAPI   *bool             `json:"using_api"`
+	Headers    map[string]string `json:"headers"`
+}
+
 type managementRegistrationResponse struct {
 	Routes []managementRoute `json:"routes,omitempty"`
 }
@@ -248,20 +265,31 @@ type managementRoute struct {
 }
 
 type accountView struct {
-	ID          string     `json:"id"`
-	AuthIndex   string     `json:"auth_index,omitempty"`
-	Name        string     `json:"name"`
-	Label       string     `json:"label,omitempty"`
-	Email       string     `json:"email,omitempty"`
-	Provider    string     `json:"provider"`
-	Type        string     `json:"type,omitempty"`
-	Status      string     `json:"status,omitempty"`
-	Disabled    bool       `json:"disabled"`
-	Unavailable bool       `json:"unavailable"`
-	Capacity    int        `json:"capacity"`
-	Enabled     bool       `json:"enabled"`
-	Active      int        `json:"active"`
-	Usage       usageStats `json:"usage"`
+	ID            string     `json:"id"`
+	AuthIndex     string     `json:"auth_index,omitempty"`
+	Name          string     `json:"name"`
+	Label         string     `json:"label,omitempty"`
+	Email         string     `json:"email,omitempty"`
+	Provider      string     `json:"provider"`
+	Type          string     `json:"type,omitempty"`
+	Status        string     `json:"status,omitempty"`
+	StatusMessage string     `json:"status_message,omitempty"`
+	Disabled      bool       `json:"disabled"`
+	Unavailable   bool       `json:"unavailable"`
+	Capacity      int        `json:"capacity"`
+	Enabled       bool       `json:"enabled"`
+	RuntimeOnly   bool       `json:"runtime_only"`
+	Source        string     `json:"source,omitempty"`
+	Path          string     `json:"path,omitempty"`
+	ProjectID     string     `json:"project_id,omitempty"`
+	AccountType   string     `json:"account_type,omitempty"`
+	Account       string     `json:"account,omitempty"`
+	Priority      int        `json:"priority,omitempty"`
+	Note          string     `json:"note,omitempty"`
+	Websockets    bool       `json:"websockets"`
+	UpdatedAt     time.Time  `json:"updated_at,omitempty"`
+	Active        int        `json:"active"`
+	Usage         usageStats `json:"usage"`
 }
 
 type accountsResponse struct {
@@ -896,6 +924,9 @@ func managementRegistration() managementRegistrationResponse {
 	return managementRegistrationResponse{Routes: []managementRoute{
 		{Method: http.MethodGet, Path: accountsPath},
 		{Method: http.MethodPut, Path: accountsPath},
+		{Method: http.MethodPost, Path: authAccountPath, Description: "新增 CPA 认证账号。"},
+		{Method: http.MethodGet, Path: authAccountPath, Description: "读取账号认证内容用于编辑。"},
+		{Method: http.MethodPut, Path: authAccountPath, Description: "编辑 CPA 认证账号。"},
 		{Method: http.MethodPost, Path: resetUsagePath},
 		{Method: http.MethodGet, Path: dashboardPath, Menu: "账号管理", Description: "管理 CPA 账号容量、当前并发和用量统计。"},
 	}}
@@ -910,11 +941,15 @@ func managementHandle(raw []byte) ([]byte, error) {
 	var resp pluginapi.ManagementResponse
 	path := strings.TrimRight(req.Path, "/")
 	switch {
-	case strings.HasSuffix(path, accountsPath):
+	case path == authAccountPath:
+		resp, _ = managementAuthAccount(context.Background(), pluginReq)
+	case path == accountsPath:
 		if req.Method == http.MethodGet {
 			resp, _ = managementAccounts(context.Background(), pluginReq)
-		} else {
+		} else if req.Method == http.MethodPut {
 			resp, _ = managementUpdateAccount(context.Background(), pluginReq)
+		} else {
+			resp = jsonResponse(http.StatusMethodNotAllowed, nil)
 		}
 	case strings.HasSuffix(path, resetUsagePath):
 		resp, _ = managementResetUsage(context.Background(), pluginReq)
@@ -924,6 +959,200 @@ func managementHandle(raw []byte) ([]byte, error) {
 		resp = jsonResponse(http.StatusNotFound, map[string]string{"error": "not found"})
 	}
 	return okEnvelope(resp)
+}
+
+func managementAuthAccount(_ context.Context, req pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
+	switch req.Method {
+	case http.MethodGet:
+		return managementGetAuthAccount(req)
+	case http.MethodPost:
+		return managementSaveAuthAccount(req, false)
+	case http.MethodPut:
+		return managementSaveAuthAccount(req, true)
+	default:
+		return jsonResponse(http.StatusMethodNotAllowed, nil), nil
+	}
+}
+
+func managementGetAuthAccount(req pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
+	authIndex := strings.TrimSpace(req.Query.Get("auth_index"))
+	if authIndex == "" {
+		return jsonResponse(http.StatusBadRequest, map[string]string{"error": "auth_index 必填"}), nil
+	}
+	result, err := callHost(pluginabi.MethodHostAuthGet, pluginapi.HostAuthGetRequest{AuthIndex: authIndex})
+	if err != nil {
+		return jsonResponse(http.StatusBadGateway, map[string]string{"error": err.Error()}), nil
+	}
+	var response pluginapi.HostAuthGetResponse
+	if err := json.Unmarshal(result, &response); err != nil {
+		return jsonResponse(http.StatusBadGateway, map[string]string{"error": "CPA 返回的认证内容无效"}), nil
+	}
+	return jsonResponse(http.StatusOK, response), nil
+}
+
+func managementSaveAuthAccount(req pluginapi.ManagementRequest, editing bool) (pluginapi.ManagementResponse, error) {
+	var input authAccountRequest
+	if err := json.Unmarshal(req.Body, &input); err != nil {
+		return jsonResponse(http.StatusBadRequest, map[string]string{"error": "请求体不是有效 JSON"}), nil
+	}
+	input.AuthIndex = strings.TrimSpace(input.AuthIndex)
+	input.Name = strings.TrimSpace(input.Name)
+	var raw json.RawMessage
+	if editing {
+		if input.AuthIndex == "" {
+			return jsonResponse(http.StatusBadRequest, map[string]string{"error": "编辑账号必须提供 auth_index"}), nil
+		}
+		result, err := callHost(pluginabi.MethodHostAuthGet, pluginapi.HostAuthGetRequest{AuthIndex: input.AuthIndex})
+		if err != nil {
+			return jsonResponse(http.StatusBadGateway, map[string]string{"error": err.Error()}), nil
+		}
+		var existing pluginapi.HostAuthGetResponse
+		if err := json.Unmarshal(result, &existing); err != nil {
+			return jsonResponse(http.StatusBadGateway, map[string]string{"error": "CPA 返回的认证内容无效"}), nil
+		}
+		input.Name = strings.TrimSpace(existing.Name)
+		raw = existing.JSON
+		if len(input.JSON) > 0 && len(strings.TrimSpace(string(input.JSON))) > 0 {
+			raw = input.JSON
+		}
+	} else {
+		raw = input.JSON
+	}
+	metadata, err := authMetadata(raw)
+	if err != nil {
+		return jsonResponse(http.StatusBadRequest, map[string]string{"error": err.Error()}), nil
+	}
+	if input.Name == "" {
+		input.Name = generatedAuthFileName(metadata)
+	}
+	if !strings.HasSuffix(strings.ToLower(input.Name), ".json") || strings.ContainsAny(input.Name, "/\\") {
+		return jsonResponse(http.StatusBadRequest, map[string]string{"error": "文件名必须是安全的 .json 文件名"}), nil
+	}
+	applyAuthMetadata(metadata, input, editing)
+	raw, err = json.Marshal(metadata)
+	if err != nil {
+		return jsonResponse(http.StatusBadRequest, map[string]string{"error": "认证 JSON 无法编码"}), nil
+	}
+	savedRaw, err := callHost(pluginabi.MethodHostAuthSave, pluginapi.HostAuthSaveRequest{Name: input.Name, JSON: raw})
+	if err != nil {
+		return jsonResponse(http.StatusBadGateway, map[string]string{"error": err.Error()}), nil
+	}
+	var saved pluginapi.HostAuthSaveResponse
+	if err := json.Unmarshal(savedRaw, &saved); err != nil {
+		return jsonResponse(http.StatusBadGateway, map[string]string{"error": "CPA 保存响应无效"}), nil
+	}
+	entries, err := hostAuthList()
+	if err != nil {
+		return jsonResponse(http.StatusOK, map[string]any{"ok": true, "saved": saved.Name, "warning": err.Error()}), nil
+	}
+	var entry *pluginapi.HostAuthFileEntry
+	for i := range entries {
+		if strings.EqualFold(strings.TrimSpace(entries[i].Name), saved.Name) || entries[i].AuthIndex == input.AuthIndex {
+			entry = &entries[i]
+			break
+		}
+	}
+	if entry != nil {
+		capacity := input.Capacity
+		if capacity < 1 {
+			state.mu.Lock()
+			capacity = state.accountConfigLocked(entry.ID).Capacity
+			state.mu.Unlock()
+		}
+		if capacity < 1 {
+			capacity = 1
+		}
+		enabled := true
+		if input.Enabled != nil {
+			enabled = *input.Enabled
+		} else if editing {
+			state.mu.Lock()
+			enabled = state.accountConfigLocked(entry.ID).Enabled
+			state.mu.Unlock()
+		}
+		state.mu.Lock()
+		state.accounts[entry.ID] = accountConfig{Capacity: capacity, Enabled: enabled, Label: strings.TrimSpace(input.Label)}
+		if editing && input.Label == "" {
+			state.accounts[entry.ID] = accountConfig{Capacity: capacity, Enabled: enabled}
+		}
+		err = saveStateLocked()
+		state.mu.Unlock()
+		if err != nil {
+			return jsonResponse(http.StatusInternalServerError, map[string]string{"error": err.Error()}), nil
+		}
+	}
+	return jsonResponse(http.StatusOK, map[string]any{"ok": true, "saved": saved.Name, "account": entry}), nil
+}
+
+func authMetadata(raw json.RawMessage) (map[string]any, error) {
+	if len(strings.TrimSpace(string(raw))) == 0 {
+		return nil, fmt.Errorf("认证 JSON 不能为空")
+	}
+	var metadata map[string]any
+	if err := json.Unmarshal(raw, &metadata); err != nil {
+		return nil, fmt.Errorf("认证 JSON 格式错误: %w", err)
+	}
+	if metadata == nil {
+		return nil, fmt.Errorf("认证 JSON 必须是对象")
+	}
+	return metadata, nil
+}
+
+func generatedAuthFileName(metadata map[string]any) string {
+	provider := strings.ToLower(metadataString(metadata, "type"))
+	if provider == "" {
+		provider = strings.ToLower(metadataString(metadata, "provider"))
+	}
+	email := metadataString(metadata, "email")
+	base := provider
+	if base == "" {
+		base = "account"
+	}
+	if email != "" {
+		base += "-" + email
+	}
+	var b strings.Builder
+	for _, r := range base {
+		if unicode.IsLetter(r) || unicode.IsDigit(r) || r == '-' || r == '_' || r == '.' {
+			b.WriteRune(r)
+		}
+	}
+	name := strings.Trim(b.String(), "-_.")
+	if name == "" {
+		name = "account"
+	}
+	return fmt.Sprintf("%s-%d.json", name, time.Now().UnixNano())
+}
+
+func applyAuthMetadata(metadata map[string]any, input authAccountRequest, editing bool) {
+	setString := func(key, value string) {
+		if value == "" && editing {
+			delete(metadata, key)
+			return
+		}
+		if value != "" {
+			metadata[key] = value
+		}
+	}
+	setString("proxy-url", strings.TrimSpace(input.ProxyURL))
+	setString("base-url", strings.TrimSpace(input.BaseURL))
+	setString("note", strings.TrimSpace(input.Note))
+	if input.Priority != nil {
+		metadata["priority"] = *input.Priority
+	}
+	if input.Websockets != nil {
+		metadata["websockets"] = *input.Websockets
+	}
+	if input.UsingAPI != nil {
+		metadata["using-api"] = *input.UsingAPI
+	}
+	if input.Headers != nil {
+		if len(input.Headers) == 0 && editing {
+			delete(metadata, "headers")
+		} else {
+			metadata["headers"] = input.Headers
+		}
+	}
 }
 
 func managementAccounts(_ context.Context, req pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
@@ -1006,7 +1235,7 @@ func buildAccountsResponse(entries []pluginapi.HostAuthFileEntry) accountsRespon
 		if dynamicCost, ok := state.accountCostLocked(id); ok {
 			usage.CostUSD = dynamicCost
 		}
-		item := accountView{ID: id, AuthIndex: entry.AuthIndex, Name: entry.Name, Label: cfg.Label, Email: entry.Email, Provider: entry.Provider, Type: entry.Type, Status: entry.Status, Disabled: entry.Disabled, Unavailable: entry.Unavailable, Capacity: cfg.Capacity, Enabled: cfg.Enabled, Active: state.active[id], Usage: usage}
+		item := accountView{ID: id, AuthIndex: entry.AuthIndex, Name: entry.Name, Label: cfg.Label, Email: entry.Email, Provider: entry.Provider, Type: entry.Type, Status: entry.Status, StatusMessage: entry.StatusMessage, Disabled: entry.Disabled, Unavailable: entry.Unavailable, Capacity: cfg.Capacity, Enabled: cfg.Enabled, RuntimeOnly: entry.RuntimeOnly, Source: entry.Source, Path: entry.Path, ProjectID: entry.ProjectID, AccountType: entry.AccountType, Account: entry.Account, Priority: entry.Priority, Note: entry.Note, Websockets: entry.Websockets, UpdatedAt: entry.UpdatedAt, Active: state.active[id], Usage: usage}
 		if item.Label == "" {
 			item.Label = entry.Label
 		}
