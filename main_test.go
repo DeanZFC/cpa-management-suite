@@ -55,6 +55,7 @@ func resetTestState(t *testing.T) {
 	state.requests = make(map[string]string)
 	state.pricing = make(map[string]modelPrice)
 	state.pricingItems = make([]pricingEntry, 0)
+	state.pricingProviders = make([]pricingProviderView, 0)
 	state.pricingAt = time.Time{}
 	state.pricingSrc = ""
 	state.usageByModel = make(map[string]map[string]tokenUsage)
@@ -279,6 +280,104 @@ func TestCompilePricingCatalogPrefersOfficialProviderAndSupportsPrefix(t *testin
 	price, ok := lookupPrice(prices, "openai/gpt-5")
 	if !ok || price.Input != input || price.Output != output {
 		t.Fatalf("price = %#v, ok=%v", price, ok)
+	}
+}
+
+func TestPricingCatalogKeepsSameModelPerProvider(t *testing.T) {
+	openInput, openOutput := 1.0, 2.0
+	azureInput, azureOutput := 3.0, 4.0
+	catalog := map[string]pricingProvider{
+		"openai": {ID: "openai", Name: "OpenAI", Models: map[string]pricingModel{
+			"gpt-5": {ID: "gpt-5", Cost: pricingCost{Input: &openInput, Output: &openOutput}},
+		}},
+		"azure": {ID: "azure", Name: "Azure OpenAI", Models: map[string]pricingModel{
+			"gpt-5": {ID: "gpt-5", Cost: pricingCost{Input: &azureInput, Output: &azureOutput}},
+		}},
+	}
+	items := pricingItemsFromCatalog(catalog)
+	if len(items) != 2 {
+		t.Fatalf("pricing items = %d, want 2: %#v", len(items), items)
+	}
+	prices := compilePricingCatalog(catalog)
+	if price, ok := lookupPriceForProvider(prices, "openai", "gpt-5"); !ok || price.Input != openInput {
+		t.Fatalf("openai price = %#v, ok=%v", price, ok)
+	}
+	if price, ok := lookupPriceForProvider(prices, "azure", "gpt-5"); !ok || price.Input != azureInput {
+		t.Fatalf("azure price = %#v, ok=%v", price, ok)
+	}
+}
+
+func TestPricingCatalogCanBeFilteredByProvider(t *testing.T) {
+	openInput, openOutput := 1.0, 2.0
+	azureInput, azureOutput := 3.0, 4.0
+	catalog := map[string]pricingProvider{
+		"openai": {ID: "openai", Models: map[string]pricingModel{
+			"gpt-5": {ID: "gpt-5", Cost: pricingCost{Input: &openInput, Output: &openOutput}},
+		}},
+		"azure": {ID: "azure", Models: map[string]pricingModel{
+			"gpt-5": {ID: "gpt-5", Cost: pricingCost{Input: &azureInput, Output: &azureOutput}},
+		}},
+	}
+	items := pricingItemsFromCatalogFiltered(catalog, "azure")
+	if len(items) != 1 || items[0].Provider != "azure" {
+		t.Fatalf("filtered items = %#v", items)
+	}
+	prices := compilePricingCatalogFiltered(catalog, "azure")
+	if _, ok := lookupPriceForProvider(prices, "openai", "gpt-5"); ok {
+		t.Fatal("filtered catalog unexpectedly contains openai price")
+	}
+}
+
+func TestPricingManagementKeepsProviderSpecificManualPrices(t *testing.T) {
+	resetTestState(t)
+	state.mu.Lock()
+	state.cfg.PricingFile = filepath.Join(t.TempDir(), "pricing.json")
+	state.mu.Unlock()
+	for _, input := range []pricingUpdateRequest{
+		{Model: "gpt-5", Provider: "openai", PromptPricePer1M: 1, CompletionPricePer1M: 2, PriceMultiplier: 1},
+		{Model: "gpt-5", Provider: "azure", PromptPricePer1M: 3, CompletionPricePer1M: 4, PriceMultiplier: 1},
+	} {
+		body, err := json.Marshal(input)
+		if err != nil {
+			t.Fatal(err)
+		}
+		response, err := managementPricing(context.Background(), pluginapi.ManagementRequest{Method: http.MethodPut, Body: body})
+		if err != nil || response.StatusCode != http.StatusOK {
+			t.Fatalf("save response = %#v, err=%v", response, err)
+		}
+	}
+	state.mu.Lock()
+	items := pricingViewsForProviderLocked("")
+	state.mu.Unlock()
+	if len(items) != 2 {
+		t.Fatalf("manual provider prices = %#v", items)
+	}
+}
+
+func TestUsageCostPrefersProviderSpecificPrice(t *testing.T) {
+	resetTestState(t)
+	state.mu.Lock()
+	state.pricing = map[string]modelPrice{
+		"openai/gpt-5": {Input: 1, Output: 2},
+		"azure/gpt-5":  {Input: 3, Output: 4},
+		"gpt-5":        {Input: 9, Output: 10},
+	}
+	state.mu.Unlock()
+	recordRaw, err := json.Marshal(pluginapi.UsageRecord{
+		AuthID: "a", Provider: "azure", Model: "gpt-5",
+		Detail: pluginapi.UsageDetail{InputTokens: 1_000_000, OutputTokens: 500_000},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := usageHandle(recordRaw); err != nil {
+		t.Fatal(err)
+	}
+	state.mu.Lock()
+	got := state.usage["a"].CostUSD
+	state.mu.Unlock()
+	if want := 3 + 0.5*4; math.Abs(got-want) > 1e-12 {
+		t.Fatalf("provider-specific cost = %.12f, want %.12f", got, want)
 	}
 }
 

@@ -12,9 +12,10 @@
 - 新增/编辑通过 CPA SDK 的 `host.auth.save` 和 `host.auth.get` 完成，保存后由 CPA 自动重新加载认证文件。
 - 状态 JSON 和价格快照原子写入，放在插件挂载目录中，容器更新不会丢失。
 - 费用规则参考 CPA Usage Keeper：从 Models.dev 同步模型价格，分别计算普通输入、缓存读取、缓存写入和输出。
-- 管理页面的“模型价格”模块支持查看、搜索、手动修改和新增模型价格，也支持点击“同步价格”强制从 Models.dev 拉取最新价格；同步和手动修改都会持久化到价格快照。
+- 模型价格按 Models.dev 的平台保存。同名模型在不同平台不会合并；同步价格时可以选择单个平台，只更新该平台的官方价格，也可以选择全部平台。
+- 管理页面的“模型价格”模块支持按平台查看、搜索、手动修改和新增模型价格，也支持点击“同步价格”强制从 Models.dev 拉取最新价格；同步和手动修改都会持久化到价格快照。
 
-页面顶部使用模块菜单布局，当前包含“账号管理”和“模型价格”。切换到“模型价格”后点击“同步价格”即可立即拉取价格，不受自动刷新间隔限制；也可以直接编辑表格中的价格后保存。
+页面顶部使用模块菜单布局，当前包含“账号管理”和“模型价格”。切换到“模型价格”后选择平台，点击“同步价格”即可立即拉取该平台的官方价格，不受自动刷新间隔限制；也可以直接编辑表格中的价格后保存。
 
 ## 构建 Linux amd64
 
@@ -78,7 +79,7 @@ plugins:
 
 CPA 的 `UsageRecord` 只提供 Token，不提供统一费用字段。插件会读取 Models.dev 的模型价格目录并保存本地快照；模型未匹配到价格时，该请求费用为 0。价格单位与 Keeper 一致，为 USD/百万 Token。
 
-费用计算与 Keeper 一致：普通输入为 `max(input - cache_read - cache_creation, 0)`，再分别乘以普通输入、缓存读取、缓存写入和输出价格，最后乘以模型倍率。插件启动时加载本地快照，并每小时检查一次，快照超过 `pricing_refresh_hours` 后自动更新。价格同步失败时继续使用本地快照。
+费用计算与 Keeper 一致：普通输入为 `max(input - cache_read - cache_creation, 0)`，再分别乘以普通输入、缓存读取、缓存写入和输出价格，最后乘以模型倍率。插件优先按 `provider + model` 匹配价格，再回退到旧版模型名匹配；因此同名模型的不同平台可以分别计费。插件启动时加载本地快照，并每小时检查一次，快照超过 `pricing_refresh_hours` 后自动更新。价格同步失败时继续使用本地快照。
 
 `state_file` 和 `pricing_file` 是高级路径配置，默认自动放在 `/CLIProxyAPI/plugins/` 下，正常使用不需要填写。通过页面保存配置时，留空的高级路径仍会回退到默认值。
 
@@ -127,6 +128,14 @@ PUT  /v0/management/account-capacity/accounts/auth         # 编辑并覆盖认�
 GET  /v0/management/account-capacity/pricing             # 读取价格
 PUT  /v0/management/account-capacity/pricing             # 保存或新增单个模型价格
 POST /v0/management/account-capacity/pricing/sync       # 强制同步 Models.dev
+```
+
+价格接口支持平台参数：
+
+```text
+GET  /v0/management/account-capacity/pricing?provider=openai
+POST /v0/management/account-capacity/pricing/sync       # Body: {"provider":"openai"}
+PUT  /v0/management/account-capacity/pricing            # Body 中可带 provider
 ```
 
 ## 注意

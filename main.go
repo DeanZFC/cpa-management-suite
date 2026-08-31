@@ -66,7 +66,7 @@ import (
 
 const (
 	pluginID        = "cpa-management-suite"
-	pluginVersion   = "0.4.0"
+	pluginVersion   = "0.5.0"
 	dashboardPath   = "/dashboard"
 	accountsPath    = "/account-capacity/accounts"
 	authAccountPath = "/account-capacity/accounts/auth"
@@ -139,11 +139,13 @@ type pricingSnapshot struct {
 	Source    string                `json:"source"`
 	Models    map[string]modelPrice `json:"models"`
 	Entries   []pricingEntry        `json:"entries,omitempty"`
+	Providers []pricingProviderView `json:"providers,omitempty"`
 }
 
 type pricingEntry struct {
 	Model        string     `json:"model"`
 	Provider     string     `json:"provider,omitempty"`
+	ProviderName string     `json:"provider_name,omitempty"`
 	Price        modelPrice `json:"price"`
 	PricingStyle string     `json:"pricing_style,omitempty"`
 }
@@ -151,6 +153,7 @@ type pricingEntry struct {
 type pricingView struct {
 	Model                string  `json:"model"`
 	Provider             string  `json:"provider,omitempty"`
+	ProviderName         string  `json:"provider_name,omitempty"`
 	PricingStyle         string  `json:"pricing_style"`
 	PromptPricePer1M     float64 `json:"prompt_price_per_1m"`
 	CompletionPricePer1M float64 `json:"completion_price_per_1m"`
@@ -159,20 +162,32 @@ type pricingView struct {
 	PriceMultiplier      float64 `json:"price_multiplier"`
 }
 
+type pricingProviderView struct {
+	ID   string `json:"id"`
+	Name string `json:"name,omitempty"`
+}
+
 type pricingListResponse struct {
-	Pricing    []pricingView `json:"pricing"`
-	Source     string        `json:"source"`
-	UpdatedAt  time.Time     `json:"updated_at,omitempty"`
-	ModelCount int           `json:"model_count"`
+	Pricing    []pricingView         `json:"pricing"`
+	Providers  []pricingProviderView `json:"providers"`
+	Provider   string                `json:"provider,omitempty"`
+	Source     string                `json:"source"`
+	UpdatedAt  time.Time             `json:"updated_at,omitempty"`
+	ModelCount int                   `json:"model_count"`
 }
 
 type pricingUpdateRequest struct {
 	Model                string  `json:"model"`
+	Provider             string  `json:"provider"`
 	PromptPricePer1M     float64 `json:"prompt_price_per_1m"`
 	CompletionPricePer1M float64 `json:"completion_price_per_1m"`
 	CacheReadPricePer1M  float64 `json:"cache_read_price_per_1m"`
 	CacheWritePricePer1M float64 `json:"cache_write_price_per_1m"`
 	PriceMultiplier      float64 `json:"price_multiplier"`
+}
+
+type pricingSyncRequest struct {
+	Provider string `json:"provider"`
 }
 
 type accountConfig struct {
@@ -215,30 +230,32 @@ type reservation struct {
 }
 
 type runtimeState struct {
-	mu           sync.Mutex
-	cfg          config
-	accounts     map[string]accountConfig
-	usage        map[string]usageStats
-	active       map[string]int
-	pending      []reservation
-	requests     map[string]string
-	pricing      map[string]modelPrice
-	pricingItems []pricingEntry
-	pricingAt    time.Time
-	pricingSrc   string
-	usageByModel map[string]map[string]tokenUsage
-	stateLoaded  bool
+	mu               sync.Mutex
+	cfg              config
+	accounts         map[string]accountConfig
+	usage            map[string]usageStats
+	active           map[string]int
+	pending          []reservation
+	requests         map[string]string
+	pricing          map[string]modelPrice
+	pricingItems     []pricingEntry
+	pricingAt        time.Time
+	pricingSrc       string
+	pricingProviders []pricingProviderView
+	usageByModel     map[string]map[string]tokenUsage
+	stateLoaded      bool
 }
 
 var state = &runtimeState{
-	cfg:          defaultConfig(),
-	accounts:     make(map[string]accountConfig),
-	usage:        make(map[string]usageStats),
-	active:       make(map[string]int),
-	requests:     make(map[string]string),
-	pricing:      make(map[string]modelPrice),
-	pricingItems: make([]pricingEntry, 0),
-	usageByModel: make(map[string]map[string]tokenUsage),
+	cfg:              defaultConfig(),
+	accounts:         make(map[string]accountConfig),
+	usage:            make(map[string]usageStats),
+	active:           make(map[string]int),
+	requests:         make(map[string]string),
+	pricing:          make(map[string]modelPrice),
+	pricingItems:     make([]pricingEntry, 0),
+	pricingProviders: make([]pricingProviderView, 0),
+	usageByModel:     make(map[string]map[string]tokenUsage),
 }
 
 const defaultPricingURL = "https://models.dev/api.json"
@@ -671,12 +688,12 @@ func usageHandle(raw []byte) ([]byte, error) {
 		if state.usageByModel[authID] == nil {
 			state.usageByModel[authID] = make(map[string]tokenUsage)
 		}
-		modelTotals := state.usageByModel[authID][modelKey]
+		modelTotals := state.usageByModel[authID][usageModelKey(record.Provider, modelKey)]
 		modelTotals.InputTokens += record.Detail.InputTokens
 		modelTotals.OutputTokens += record.Detail.OutputTokens
 		modelTotals.CacheReadTokens += record.Detail.CacheReadTokens
 		modelTotals.CacheCreateTokens += record.Detail.CacheCreationTokens
-		state.usageByModel[authID][modelKey] = modelTotals
+		state.usageByModel[authID][usageModelKey(record.Provider, modelKey)] = modelTotals
 	}
 	if record.RequestedAt.IsZero() {
 		item.LastRequestAt = time.Now()
@@ -691,7 +708,7 @@ func usageHandle(raw []byte) ([]byte, error) {
 }
 
 func estimateCostLocked(record pluginapi.UsageRecord) float64 {
-	price, ok := findPriceLocked(record.Model, record.Alias)
+	price, ok := findPriceLocked(record.Provider, record.Model, record.Alias)
 	if !ok {
 		return 0
 	}
@@ -720,13 +737,65 @@ func maxInt64(value, floor int64) int64 {
 	return value
 }
 
-func findPriceLocked(model, alias string) (modelPrice, bool) {
+func findPriceLocked(provider, model, alias string) (modelPrice, bool) {
 	for _, candidate := range []string{model, alias} {
-		if price, ok := lookupPrice(state.pricing, candidate); ok {
-			return price, true
+		for _, providerCandidate := range providerCandidates(provider, candidate) {
+			if price, ok := lookupPriceForProvider(state.pricing, providerCandidate, candidate); ok {
+				return price, true
+			}
 		}
 	}
 	return modelPrice{}, false
+}
+
+func providerCandidates(provider, model string) []string {
+	result := make([]string, 0, 3)
+	seen := make(map[string]struct{})
+	add := func(value string) {
+		value = strings.TrimSpace(value)
+		if value == "" {
+			return
+		}
+		key := strings.ToLower(value)
+		if _, ok := seen[key]; ok {
+			return
+		}
+		seen[key] = struct{}{}
+		result = append(result, value)
+	}
+	add(provider)
+	switch strings.ToLower(strings.TrimSpace(provider)) {
+	case "codex", "chatgpt":
+		add("openai")
+	case "claude", "claude-code":
+		add("anthropic")
+	case "gemini", "gemini-cli":
+		add("google")
+	}
+	if len(result) == 0 && strings.Contains(strings.ToLower(model), "/") {
+		add(strings.SplitN(model, "/", 2)[0])
+	}
+	if len(result) == 0 {
+		return []string{""}
+	}
+	return result
+}
+
+func usageModelKey(provider, model string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	model = strings.TrimSpace(model)
+	if provider == "" {
+		return model
+	}
+	return provider + "\x00" + model
+}
+
+func splitUsageModelKey(key string) (string, string) {
+	parts := strings.SplitN(key, "\x00", 2)
+	if len(parts) == 2 {
+		return parts[0], parts[1]
+	}
+	return "", key
 }
 
 func lookupPrice(prices map[string]modelPrice, raw string) (modelPrice, bool) {
@@ -735,6 +804,35 @@ func lookupPrice(prices map[string]modelPrice, raw string) (modelPrice, bool) {
 		return modelPrice{}, false
 	}
 	for _, key := range []string{raw, stripModelPrefix(raw), normalizeModelKey(raw), normalizeModelKey(stripModelPrefix(raw))} {
+		if key == "" {
+			continue
+		}
+		if price, ok := prices[strings.ToLower(key)]; ok {
+			return price, true
+		}
+	}
+	return modelPrice{}, false
+}
+
+func lookupPriceForProvider(prices map[string]modelPrice, provider, raw string) (modelPrice, bool) {
+	provider = strings.TrimSpace(provider)
+	if provider != "" {
+		for _, model := range []string{raw, stripModelPrefix(raw), normalizeModelKey(raw), normalizeModelKey(stripModelPrefix(raw))} {
+			if model == "" {
+				continue
+			}
+			for _, key := range []string{provider + "/" + model, provider + ":" + model} {
+				if price, ok := lookupPriceExact(prices, key); ok {
+					return price, true
+				}
+			}
+		}
+	}
+	return lookupPrice(prices, raw)
+}
+
+func lookupPriceExact(prices map[string]modelPrice, raw string) (modelPrice, bool) {
+	for _, key := range []string{raw, normalizeModelKey(raw)} {
 		if key == "" {
 			continue
 		}
@@ -759,15 +857,19 @@ func loadPricingFileLocked(path string) {
 	if len(state.pricingItems) == 0 {
 		state.pricingItems = pricingItemsFromMap(snapshot.Models)
 	}
+	state.pricingProviders = snapshot.Providers
+	if len(state.pricingProviders) == 0 {
+		state.pricingProviders = pricingProvidersFromItems(state.pricingItems)
+	}
 	state.pricingAt = snapshot.UpdatedAt
 	state.pricingSrc = snapshot.Source
 }
 
 func refreshPricing(cfg config) {
-	_ = refreshPricingNow(cfg, false)
+	_ = refreshPricingNow(cfg, false, "")
 }
 
-func refreshPricingNow(cfg config, force bool) error {
+func refreshPricingNow(cfg config, force bool, providerFilter string) error {
 	state.mu.Lock()
 	if !pricingRefreshDue(state.pricingAt, cfg.PricingRefreshHours, force) {
 		state.mu.Unlock()
@@ -789,19 +891,26 @@ func refreshPricingNow(cfg config, force bool) error {
 	if err := decoder.Decode(&catalog); err != nil {
 		return err
 	}
-	prices := compilePricingCatalog(catalog)
+	prices := compilePricingCatalogFiltered(catalog, providerFilter)
 	if len(prices) == 0 {
 		return fmt.Errorf("价格目录为空")
 	}
 	now := time.Now().UTC()
-	items := pricingItemsFromCatalog(catalog)
-	snapshot := pricingSnapshot{UpdatedAt: now, Source: cfg.PricingURL, Models: prices, Entries: items}
+	items := pricingItemsFromCatalogFiltered(catalog, providerFilter)
+	state.mu.Lock()
+	if providerFilter != "" {
+		prices, items = mergePricingProvider(state.pricing, state.pricingItems, items, providerFilter)
+	}
+	state.mu.Unlock()
+	providers := pricingProvidersFromCatalog(catalog)
+	snapshot := pricingSnapshot{UpdatedAt: now, Source: cfg.PricingURL, Models: prices, Entries: items, Providers: providers}
 	if err := savePricingFile(cfg.PricingFile, snapshot); err != nil {
 		return err
 	}
 	state.mu.Lock()
 	state.pricing = prices
 	state.pricingItems = items
+	state.pricingProviders = providers
 	state.pricingAt = now
 	state.pricingSrc = cfg.PricingURL
 	state.mu.Unlock()
@@ -836,17 +945,25 @@ func savePricingFile(path string, snapshot pricingSnapshot) error {
 }
 
 type catalogPricingEntry struct {
-	Provider string
-	Model    pricingModel
-	Price    modelPrice
+	Provider     string
+	ProviderName string
+	Model        pricingModel
+	Price        modelPrice
 }
 
 func compilePricingCatalog(catalog map[string]pricingProvider) map[string]modelPrice {
+	return compilePricingCatalogFiltered(catalog, "")
+}
+
+func compilePricingCatalogFiltered(catalog map[string]pricingProvider, providerFilter string) map[string]modelPrice {
 	entries := make([]catalogPricingEntry, 0)
 	for providerKey, provider := range catalog {
 		providerID := strings.TrimSpace(provider.ID)
 		if providerID == "" {
 			providerID = strings.TrimSpace(providerKey)
+		}
+		if !providerMatches(providerID, providerKey, providerFilter) {
+			continue
 		}
 		for modelKey, item := range provider.Models {
 			modelID := strings.TrimSpace(item.ID)
@@ -867,11 +984,17 @@ func compilePricingCatalog(catalog map[string]pricingProvider) map[string]modelP
 				continue
 			}
 			item.ID = modelID
-			entries = append(entries, catalogPricingEntry{Provider: providerID, Model: item, Price: price})
+			entries = append(entries, catalogPricingEntry{Provider: providerID, ProviderName: provider.Name, Model: item, Price: price})
 		}
 	}
 
 	prices := make(map[string]modelPrice, len(entries)*4)
+	for _, entry := range entries {
+		putQualifiedPriceAliases(prices, entry.Provider, entry.Model.ID, entry.Price)
+	}
+	if providerFilter != "" {
+		return prices
+	}
 	chosen := make(map[string]catalogPricingEntry)
 	for _, entry := range entries {
 		for _, modelKey := range []string{entry.Model.ID, entry.Model.Name} {
@@ -894,11 +1017,18 @@ func compilePricingCatalog(catalog map[string]pricingProvider) map[string]modelP
 }
 
 func pricingItemsFromCatalog(catalog map[string]pricingProvider) []pricingEntry {
+	return pricingItemsFromCatalogFiltered(catalog, "")
+}
+
+func pricingItemsFromCatalogFiltered(catalog map[string]pricingProvider, providerFilter string) []pricingEntry {
 	chosen := make(map[string]catalogPricingEntry)
 	for providerKey, provider := range catalog {
 		providerID := strings.TrimSpace(provider.ID)
 		if providerID == "" {
 			providerID = strings.TrimSpace(providerKey)
+		}
+		if !providerMatches(providerID, providerKey, providerFilter) {
+			continue
 		}
 		for modelKey, item := range provider.Models {
 			modelID := strings.TrimSpace(item.ID)
@@ -920,17 +1050,18 @@ func pricingItemsFromCatalog(catalog map[string]pricingProvider) []pricingEntry 
 			}
 			item.ID = modelID
 			key := strings.ToLower(modelID)
-			entry := catalogPricingEntry{Provider: providerID, Model: item, Price: price}
-			if old, ok := chosen[key]; !ok || betterPricingEntry(entry, old) {
-				chosen[key] = entry
+			entry := catalogPricingEntry{Provider: providerID, ProviderName: provider.Name, Model: item, Price: price}
+			providerModelKey := strings.ToLower(providerID + "\x00" + key)
+			if old, ok := chosen[providerModelKey]; !ok || betterPricingEntry(entry, old) {
+				chosen[providerModelKey] = entry
 			}
 		}
 	}
 	result := make([]pricingEntry, 0, len(chosen))
 	for _, item := range chosen {
-		result = append(result, pricingEntry{Model: item.Model.ID, Provider: item.Provider, Price: item.Price, PricingStyle: pricingStyle(item.Provider)})
+		result = append(result, pricingEntry{Model: item.Model.ID, Provider: item.Provider, ProviderName: item.ProviderName, Price: item.Price, PricingStyle: pricingStyle(item.Provider, item.Model.ID)})
 	}
-	sort.Slice(result, func(i, j int) bool { return strings.ToLower(result[i].Model) < strings.ToLower(result[j].Model) })
+	sortPricingEntries(result)
 	return result
 }
 
@@ -947,18 +1078,122 @@ func pricingItemsFromMap(prices map[string]modelPrice) []pricingEntry {
 			continue
 		}
 		seen[canonical] = struct{}{}
-		result = append(result, pricingEntry{Model: key, Price: price, PricingStyle: "OpenAI"})
+		result = append(result, pricingEntry{Model: key, Price: price, PricingStyle: pricingStyle("", key)})
 	}
 	sort.Slice(result, func(i, j int) bool { return strings.ToLower(result[i].Model) < strings.ToLower(result[j].Model) })
 	return result
 }
 
-func pricingStyle(provider string) string {
-	provider = strings.ToLower(provider)
-	if strings.Contains(provider, "anthropic") || strings.Contains(provider, "claude") {
+func pricingStyle(provider, model string) string {
+	provider = strings.ToLower(strings.TrimSpace(provider))
+	model = strings.ToLower(strings.TrimSpace(model))
+	if strings.Contains(provider, "anthropic") || strings.Contains(provider, "claude") || strings.Contains(model, "claude") {
 		return "Claude"
 	}
-	return "OpenAI"
+	if strings.Contains(provider, "google") || strings.Contains(provider, "gemini") || strings.Contains(model, "gemini") {
+		return "Gemini"
+	}
+	if strings.Contains(provider, "deepseek") || strings.Contains(model, "deepseek") {
+		return "DeepSeek"
+	}
+	if strings.Contains(provider, "qwen") || strings.Contains(provider, "alibaba") || strings.Contains(model, "qwen") {
+		return "Qwen"
+	}
+	if strings.Contains(provider, "openai") || strings.HasPrefix(model, "gpt-") || strings.HasPrefix(model, "o1") || strings.HasPrefix(model, "o3") || strings.HasPrefix(model, "o4") {
+		return "OpenAI"
+	}
+	if provider != "" {
+		return provider
+	}
+	return "Custom"
+}
+
+func providerMatches(providerID, providerKey, filter string) bool {
+	filter = strings.TrimSpace(filter)
+	return filter == "" || strings.EqualFold(filter, strings.TrimSpace(providerID)) || strings.EqualFold(filter, strings.TrimSpace(providerKey))
+}
+
+func putQualifiedPriceAliases(prices map[string]modelPrice, provider, model string, price modelPrice) {
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	if provider == "" || model == "" {
+		return
+	}
+	for _, candidate := range []string{model, stripModelPrefix(model), normalizeModelKey(model), normalizeModelKey(stripModelPrefix(model))} {
+		if candidate != "" {
+			prices[strings.ToLower(provider+"/"+candidate)] = price
+		}
+	}
+}
+
+func pricingProvidersFromCatalog(catalog map[string]pricingProvider) []pricingProviderView {
+	providers := make(map[string]pricingProviderView)
+	for key, provider := range catalog {
+		id := strings.TrimSpace(provider.ID)
+		if id == "" {
+			id = strings.TrimSpace(key)
+		}
+		if id == "" {
+			continue
+		}
+		name := strings.TrimSpace(provider.Name)
+		if name == "" {
+			name = id
+		}
+		providers[strings.ToLower(id)] = pricingProviderView{ID: id, Name: name}
+	}
+	result := make([]pricingProviderView, 0, len(providers))
+	for _, provider := range providers {
+		result = append(result, provider)
+	}
+	sort.Slice(result, func(i, j int) bool { return strings.ToLower(result[i].Name) < strings.ToLower(result[j].Name) })
+	return result
+}
+
+func pricingProvidersFromItems(items []pricingEntry) []pricingProviderView {
+	providers := make(map[string]pricingProviderView)
+	for _, item := range items {
+		id := strings.TrimSpace(item.Provider)
+		if id == "" {
+			continue
+		}
+		name := strings.TrimSpace(item.ProviderName)
+		if name == "" {
+			name = id
+		}
+		providers[strings.ToLower(id)] = pricingProviderView{ID: id, Name: name}
+	}
+	result := make([]pricingProviderView, 0, len(providers))
+	for _, provider := range providers {
+		result = append(result, provider)
+	}
+	sort.Slice(result, func(i, j int) bool { return strings.ToLower(result[i].Name) < strings.ToLower(result[j].Name) })
+	return result
+}
+
+func sortPricingEntries(entries []pricingEntry) {
+	sort.Slice(entries, func(i, j int) bool {
+		leftProvider := strings.ToLower(entries[i].ProviderName + "\x00" + entries[i].Provider)
+		rightProvider := strings.ToLower(entries[j].ProviderName + "\x00" + entries[j].Provider)
+		if leftProvider != rightProvider {
+			return leftProvider < rightProvider
+		}
+		return strings.ToLower(entries[i].Model) < strings.ToLower(entries[j].Model)
+	})
+}
+
+func mergePricingProvider(oldPrices map[string]modelPrice, oldItems, replacementItems []pricingEntry, provider string) (map[string]modelPrice, []pricingEntry) {
+	if len(oldItems) == 0 {
+		oldItems = pricingItemsFromMap(oldPrices)
+	}
+	merged := make([]pricingEntry, 0, len(oldItems)+len(replacementItems))
+	for _, item := range oldItems {
+		if !strings.EqualFold(strings.TrimSpace(item.Provider), strings.TrimSpace(provider)) {
+			merged = append(merged, item)
+		}
+	}
+	merged = append(merged, replacementItems...)
+	return pricingMapFromEntries(merged), merged
 }
 
 func validPrice(price modelPrice) bool {
@@ -1360,8 +1595,9 @@ func managementDashboard(_ context.Context, req pluginapi.ManagementRequest) (pl
 func managementPricing(_ context.Context, req pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
 	switch req.Method {
 	case http.MethodGet:
+		provider := strings.TrimSpace(req.Query.Get("provider"))
 		state.mu.Lock()
-		response := pricingListResponse{Pricing: pricingViewsLocked(), Source: state.pricingSrc, UpdatedAt: state.pricingAt}
+		response := pricingResponseLocked(provider)
 		response.ModelCount = len(response.Pricing)
 		state.mu.Unlock()
 		return jsonResponse(http.StatusOK, response), nil
@@ -1371,6 +1607,7 @@ func managementPricing(_ context.Context, req pluginapi.ManagementRequest) (plug
 			return jsonResponse(http.StatusBadRequest, map[string]string{"error": "请求体不是有效 JSON"}), nil
 		}
 		input.Model = strings.TrimSpace(input.Model)
+		input.Provider = strings.TrimSpace(input.Provider)
 		if input.Model == "" || input.PriceMultiplier < 0 || math.IsNaN(input.PriceMultiplier) || math.IsInf(input.PriceMultiplier, 0) || !validPrice(modelPrice{Input: input.PromptPricePer1M, Output: input.CompletionPricePer1M, CacheRead: input.CacheReadPricePer1M, CacheWrite: input.CacheWritePricePer1M}) {
 			return jsonResponse(http.StatusBadRequest, map[string]string{"error": "模型和价格必须有效，价格不能为负数"}), nil
 		}
@@ -1379,14 +1616,16 @@ func managementPricing(_ context.Context, req pluginapi.ManagementRequest) (plug
 		}
 		state.mu.Lock()
 		price := modelPrice{Input: input.PromptPricePer1M, Output: input.CompletionPricePer1M, CacheRead: input.CacheReadPricePer1M, CacheWrite: input.CacheWritePricePer1M, Multiplier: input.PriceMultiplier}
-		putPriceAliasesLocked(input.Model, price)
-		upsertPricingItemLocked(pricingEntry{Model: input.Model, Price: price, PricingStyle: "OpenAI"})
-		snapshot := pricingSnapshot{UpdatedAt: state.pricingAt, Source: state.pricingSrc, Models: state.pricing, Entries: state.pricingItems}
+		putPriceAliasesLocked(input.Provider, input.Model, price)
+		upsertPricingProviderLocked(input.Provider)
+		upsertPricingItemLocked(pricingEntry{Model: input.Model, Provider: input.Provider, Price: price, PricingStyle: pricingStyle(input.Provider, input.Model)})
+		snapshot := pricingSnapshot{UpdatedAt: state.pricingAt, Source: state.pricingSrc, Models: state.pricing, Entries: state.pricingItems, Providers: state.pricingProviders}
 		if snapshot.UpdatedAt.IsZero() {
 			snapshot.UpdatedAt = time.Now().UTC()
 		}
 		err := savePricingFile(state.cfg.PricingFile, snapshot)
-		response := pricingListResponse{Pricing: pricingViewsLocked(), Source: state.pricingSrc, UpdatedAt: snapshot.UpdatedAt}
+		response := pricingResponseLocked(input.Provider)
+		response.UpdatedAt = snapshot.UpdatedAt
 		response.ModelCount = len(response.Pricing)
 		state.mu.Unlock()
 		if err != nil {
@@ -1402,36 +1641,58 @@ func managementPricingSync(_ context.Context, req pluginapi.ManagementRequest) (
 	if req.Method != http.MethodPost {
 		return jsonResponse(http.StatusMethodNotAllowed, nil), nil
 	}
-	if err := refreshPricingNow(currentConfig(), true); err != nil {
+	var input pricingSyncRequest
+	if len(req.Body) > 0 {
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return jsonResponse(http.StatusBadRequest, map[string]string{"error": "请求体不是有效 JSON"}), nil
+		}
+	}
+	input.Provider = strings.TrimSpace(input.Provider)
+	if err := refreshPricingNow(currentConfig(), true, input.Provider); err != nil {
 		return jsonResponse(http.StatusBadGateway, map[string]string{"error": "同步 Models.dev 价格失败: " + err.Error()}), nil
 	}
 	state.mu.Lock()
-	response := pricingListResponse{Pricing: pricingViewsLocked(), Source: state.pricingSrc, UpdatedAt: state.pricingAt}
+	response := pricingResponseLocked(input.Provider)
 	response.ModelCount = len(response.Pricing)
 	state.mu.Unlock()
 	return jsonResponse(http.StatusOK, response), nil
 }
 
 func pricingViewsLocked() []pricingView {
+	return pricingViewsForProviderLocked("")
+}
+
+func pricingViewsForProviderLocked(provider string) []pricingView {
 	items := state.pricingItems
 	if len(items) == 0 {
 		items = pricingItemsFromMap(state.pricing)
 	}
 	result := make([]pricingView, 0, len(items))
 	for _, item := range items {
+		if provider != "" && !strings.EqualFold(strings.TrimSpace(item.Provider), provider) {
+			continue
+		}
 		multiplier := item.Price.Multiplier
 		if multiplier == 0 {
 			multiplier = 1
 		}
-		result = append(result, pricingView{Model: item.Model, Provider: item.Provider, PricingStyle: item.PricingStyle, PromptPricePer1M: item.Price.Input, CompletionPricePer1M: item.Price.Output, CacheReadPricePer1M: item.Price.CacheRead, CacheWritePricePer1M: item.Price.CacheWrite, PriceMultiplier: multiplier})
+		result = append(result, pricingView{Model: item.Model, Provider: item.Provider, ProviderName: item.ProviderName, PricingStyle: item.PricingStyle, PromptPricePer1M: item.Price.Input, CompletionPricePer1M: item.Price.Output, CacheReadPricePer1M: item.Price.CacheRead, CacheWritePricePer1M: item.Price.CacheWrite, PriceMultiplier: multiplier})
 	}
-	sort.Slice(result, func(i, j int) bool { return strings.ToLower(result[i].Model) < strings.ToLower(result[j].Model) })
+	sort.Slice(result, func(i, j int) bool {
+		left := strings.ToLower(result[i].ProviderName + "\x00" + result[i].Provider + "\x00" + result[i].Model)
+		right := strings.ToLower(result[j].ProviderName + "\x00" + result[j].Provider + "\x00" + result[j].Model)
+		return left < right
+	})
 	return result
+}
+
+func pricingResponseLocked(provider string) pricingListResponse {
+	return pricingListResponse{Pricing: pricingViewsForProviderLocked(provider), Providers: state.pricingProviders, Provider: provider, Source: state.pricingSrc, UpdatedAt: state.pricingAt}
 }
 
 func upsertPricingItemLocked(item pricingEntry) {
 	for i := range state.pricingItems {
-		if strings.EqualFold(state.pricingItems[i].Model, item.Model) {
+		if strings.EqualFold(state.pricingItems[i].Model, item.Model) && strings.EqualFold(state.pricingItems[i].Provider, item.Provider) {
 			state.pricingItems[i] = item
 			return
 		}
@@ -1439,12 +1700,60 @@ func upsertPricingItemLocked(item pricingEntry) {
 	state.pricingItems = append(state.pricingItems, item)
 }
 
-func putPriceAliasesLocked(model string, price modelPrice) {
+func upsertPricingProviderLocked(provider string) {
+	provider = strings.TrimSpace(provider)
+	if provider == "" {
+		return
+	}
+	for _, item := range state.pricingProviders {
+		if strings.EqualFold(item.ID, provider) {
+			return
+		}
+	}
+	state.pricingProviders = append(state.pricingProviders, pricingProviderView{ID: provider, Name: provider})
+	sort.Slice(state.pricingProviders, func(i, j int) bool {
+		return strings.ToLower(state.pricingProviders[i].Name) < strings.ToLower(state.pricingProviders[j].Name)
+	})
+}
+
+func putPriceAliasesLocked(provider, model string, price modelPrice) {
+	if provider != "" {
+		putQualifiedPriceAliases(state.pricing, provider, model, price)
+		return
+	}
 	for _, key := range []string{model, stripModelPrefix(model), normalizeModelKey(model), normalizeModelKey(stripModelPrefix(model))} {
 		if key != "" {
 			state.pricing[strings.ToLower(key)] = price
 		}
 	}
+}
+
+func pricingMapFromEntries(entries []pricingEntry) map[string]modelPrice {
+	prices := make(map[string]modelPrice, len(entries)*4)
+	chosen := make(map[string]pricingEntry)
+	for _, entry := range entries {
+		if entry.Provider != "" {
+			putQualifiedPriceAliases(prices, entry.Provider, entry.Model, entry.Price)
+		}
+		key := strings.ToLower(strings.TrimSpace(entry.Model))
+		if key == "" {
+			continue
+		}
+		if old, ok := chosen[key]; !ok || betterPricingEntry(
+			catalogPricingEntry{Provider: entry.Provider, Model: pricingModel{ID: entry.Model}, Price: entry.Price},
+			catalogPricingEntry{Provider: old.Provider, Model: pricingModel{ID: old.Model}, Price: old.Price},
+		) {
+			chosen[key] = entry
+		}
+	}
+	for key, entry := range chosen {
+		for _, alias := range []string{key, stripModelPrefix(key), normalizeModelKey(key), normalizeModelKey(stripModelPrefix(key))} {
+			if alias != "" {
+				prices[strings.ToLower(alias)] = entry.Price
+			}
+		}
+	}
+	return prices
 }
 
 func buildAccountsResponse(entries []pluginapi.HostAuthFileEntry) accountsResponse {
@@ -1563,8 +1872,9 @@ func (s *runtimeState) accountCostLocked(authID string) (float64, bool) {
 		return 0, false
 	}
 	var total float64
-	for model, usage := range models {
-		price, ok := lookupPrice(s.pricing, model)
+	for modelKey, usage := range models {
+		provider, model := splitUsageModelKey(modelKey)
+		price, ok := lookupPriceForProvider(s.pricing, provider, model)
 		if !ok {
 			continue
 		}
