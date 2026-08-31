@@ -66,10 +66,12 @@ import (
 
 const (
 	pluginID        = "cpa-management-suite"
-	pluginVersion   = "0.2.0"
+	pluginVersion   = "0.3.0"
 	dashboardPath   = "/dashboard"
 	accountsPath    = "/account-capacity/accounts"
 	authAccountPath = "/account-capacity/accounts/auth"
+	pricingPath     = "/account-capacity/pricing"
+	pricingSyncPath = "/account-capacity/pricing/sync"
 	resetUsagePath  = "/account-capacity/reset-usage"
 )
 
@@ -106,6 +108,7 @@ type modelPrice struct {
 	Output     float64 `json:"output"`
 	CacheRead  float64 `json:"cache_read"`
 	CacheWrite float64 `json:"cache_write"`
+	Multiplier float64 `json:"multiplier,omitempty"`
 }
 
 type pricingProvider struct {
@@ -134,6 +137,41 @@ type pricingSnapshot struct {
 	UpdatedAt time.Time             `json:"updated_at"`
 	Source    string                `json:"source"`
 	Models    map[string]modelPrice `json:"models"`
+	Entries   []pricingEntry        `json:"entries,omitempty"`
+}
+
+type pricingEntry struct {
+	Model        string     `json:"model"`
+	Provider     string     `json:"provider,omitempty"`
+	Price        modelPrice `json:"price"`
+	PricingStyle string     `json:"pricing_style,omitempty"`
+}
+
+type pricingView struct {
+	Model                string  `json:"model"`
+	Provider             string  `json:"provider,omitempty"`
+	PricingStyle         string  `json:"pricing_style"`
+	PromptPricePer1M     float64 `json:"prompt_price_per_1m"`
+	CompletionPricePer1M float64 `json:"completion_price_per_1m"`
+	CacheReadPricePer1M  float64 `json:"cache_read_price_per_1m"`
+	CacheWritePricePer1M float64 `json:"cache_write_price_per_1m"`
+	PriceMultiplier      float64 `json:"price_multiplier"`
+}
+
+type pricingListResponse struct {
+	Pricing    []pricingView `json:"pricing"`
+	Source     string        `json:"source"`
+	UpdatedAt  time.Time     `json:"updated_at,omitempty"`
+	ModelCount int           `json:"model_count"`
+}
+
+type pricingUpdateRequest struct {
+	Model                string  `json:"model"`
+	PromptPricePer1M     float64 `json:"prompt_price_per_1m"`
+	CompletionPricePer1M float64 `json:"completion_price_per_1m"`
+	CacheReadPricePer1M  float64 `json:"cache_read_price_per_1m"`
+	CacheWritePricePer1M float64 `json:"cache_write_price_per_1m"`
+	PriceMultiplier      float64 `json:"price_multiplier"`
 }
 
 type accountConfig struct {
@@ -184,6 +222,7 @@ type runtimeState struct {
 	pending      []reservation
 	requests     map[string]string
 	pricing      map[string]modelPrice
+	pricingItems []pricingEntry
 	pricingAt    time.Time
 	pricingSrc   string
 	usageByModel map[string]map[string]tokenUsage
@@ -197,6 +236,7 @@ var state = &runtimeState{
 	active:       make(map[string]int),
 	requests:     make(map[string]string),
 	pricing:      make(map[string]modelPrice),
+	pricingItems: make([]pricingEntry, 0),
 	usageByModel: make(map[string]map[string]tokenUsage),
 }
 
@@ -661,10 +701,14 @@ func estimateCostLocked(record pluginapi.UsageRecord) float64 {
 	if normalInput < 0 {
 		normalInput = 0
 	}
-	return (float64(normalInput)/1_000_000)*price.Input +
+	multiplier := price.Multiplier
+	if multiplier == 0 {
+		multiplier = 1
+	}
+	return multiplier * ((float64(normalInput)/1_000_000)*price.Input +
 		(float64(cacheRead)/1_000_000)*price.CacheRead +
 		(float64(cacheWrite)/1_000_000)*price.CacheWrite +
-		(float64(output)/1_000_000)*price.Output
+		(float64(output)/1_000_000)*price.Output)
 }
 
 func maxInt64(value, floor int64) int64 {
@@ -709,46 +753,64 @@ func loadPricingFileLocked(path string) {
 		return
 	}
 	state.pricing = snapshot.Models
+	state.pricingItems = snapshot.Entries
+	if len(state.pricingItems) == 0 {
+		state.pricingItems = pricingItemsFromMap(snapshot.Models)
+	}
 	state.pricingAt = snapshot.UpdatedAt
 	state.pricingSrc = snapshot.Source
 }
 
 func refreshPricing(cfg config) {
+	_ = refreshPricingNow(cfg, false)
+}
+
+func refreshPricingNow(cfg config, force bool) error {
 	state.mu.Lock()
-	if !state.pricingAt.IsZero() && time.Since(state.pricingAt) < time.Duration(cfg.PricingRefreshHours)*time.Hour {
+	if !pricingRefreshDue(state.pricingAt, cfg.PricingRefreshHours, force) {
 		state.mu.Unlock()
-		return
+		return nil
 	}
 	state.mu.Unlock()
 
 	client := &http.Client{Timeout: 20 * time.Second}
 	response, err := client.Get(cfg.PricingURL)
 	if err != nil {
-		return
+		return err
 	}
 	defer response.Body.Close()
 	if response.StatusCode < http.StatusOK || response.StatusCode >= http.StatusMultipleChoices {
-		return
+		return fmt.Errorf("HTTP %d", response.StatusCode)
 	}
 	var catalog map[string]pricingProvider
 	decoder := json.NewDecoder(io.LimitReader(response.Body, 64<<20))
 	if err := decoder.Decode(&catalog); err != nil {
-		return
+		return err
 	}
 	prices := compilePricingCatalog(catalog)
 	if len(prices) == 0 {
-		return
+		return fmt.Errorf("价格目录为空")
 	}
 	now := time.Now().UTC()
-	snapshot := pricingSnapshot{UpdatedAt: now, Source: cfg.PricingURL, Models: prices}
+	items := pricingItemsFromCatalog(catalog)
+	snapshot := pricingSnapshot{UpdatedAt: now, Source: cfg.PricingURL, Models: prices, Entries: items}
 	if err := savePricingFile(cfg.PricingFile, snapshot); err != nil {
-		return
+		return err
 	}
 	state.mu.Lock()
 	state.pricing = prices
+	state.pricingItems = items
 	state.pricingAt = now
 	state.pricingSrc = cfg.PricingURL
 	state.mu.Unlock()
+	return nil
+}
+
+func pricingRefreshDue(updatedAt time.Time, refreshHours int, force bool) bool {
+	if force || updatedAt.IsZero() {
+		return true
+	}
+	return time.Since(updatedAt) >= time.Duration(refreshHours)*time.Hour
 }
 
 func savePricingFile(path string, snapshot pricingSnapshot) error {
@@ -827,6 +889,74 @@ func compilePricingCatalog(catalog map[string]pricingProvider) map[string]modelP
 		prices[normalizeModelKey(stripModelPrefix(key))] = entry.Price
 	}
 	return prices
+}
+
+func pricingItemsFromCatalog(catalog map[string]pricingProvider) []pricingEntry {
+	chosen := make(map[string]catalogPricingEntry)
+	for providerKey, provider := range catalog {
+		providerID := strings.TrimSpace(provider.ID)
+		if providerID == "" {
+			providerID = strings.TrimSpace(providerKey)
+		}
+		for modelKey, item := range provider.Models {
+			modelID := strings.TrimSpace(item.ID)
+			if modelID == "" {
+				modelID = strings.TrimSpace(modelKey)
+			}
+			if modelID == "" || item.Cost.Input == nil || item.Cost.Output == nil {
+				continue
+			}
+			price := modelPrice{Input: *item.Cost.Input, Output: *item.Cost.Output}
+			if item.Cost.CacheRead != nil {
+				price.CacheRead = *item.Cost.CacheRead
+			}
+			if item.Cost.CacheWrite != nil {
+				price.CacheWrite = *item.Cost.CacheWrite
+			}
+			if !validPrice(price) {
+				continue
+			}
+			item.ID = modelID
+			key := strings.ToLower(modelID)
+			entry := catalogPricingEntry{Provider: providerID, Model: item, Price: price}
+			if old, ok := chosen[key]; !ok || betterPricingEntry(entry, old) {
+				chosen[key] = entry
+			}
+		}
+	}
+	result := make([]pricingEntry, 0, len(chosen))
+	for _, item := range chosen {
+		result = append(result, pricingEntry{Model: item.Model.ID, Provider: item.Provider, Price: item.Price, PricingStyle: pricingStyle(item.Provider)})
+	}
+	sort.Slice(result, func(i, j int) bool { return strings.ToLower(result[i].Model) < strings.ToLower(result[j].Model) })
+	return result
+}
+
+func pricingItemsFromMap(prices map[string]modelPrice) []pricingEntry {
+	result := make([]pricingEntry, 0, len(prices))
+	seen := make(map[string]struct{})
+	for key, price := range prices {
+		key = strings.TrimSpace(key)
+		if key == "" || strings.ContainsAny(key, "/:") || strings.Contains(strings.ToLower(key), " ") {
+			continue
+		}
+		canonical := strings.ToLower(stripModelPrefix(key))
+		if _, ok := seen[canonical]; ok {
+			continue
+		}
+		seen[canonical] = struct{}{}
+		result = append(result, pricingEntry{Model: key, Price: price, PricingStyle: "OpenAI"})
+	}
+	sort.Slice(result, func(i, j int) bool { return strings.ToLower(result[i].Model) < strings.ToLower(result[j].Model) })
+	return result
+}
+
+func pricingStyle(provider string) string {
+	provider = strings.ToLower(provider)
+	if strings.Contains(provider, "anthropic") || strings.Contains(provider, "claude") {
+		return "Claude"
+	}
+	return "OpenAI"
 }
 
 func validPrice(price modelPrice) bool {
@@ -927,6 +1057,9 @@ func managementRegistration() managementRegistrationResponse {
 		{Method: http.MethodPost, Path: authAccountPath, Description: "新增 CPA 认证账号。"},
 		{Method: http.MethodGet, Path: authAccountPath, Description: "读取账号认证内容用于编辑。"},
 		{Method: http.MethodPut, Path: authAccountPath, Description: "编辑 CPA 认证账号。"},
+		{Method: http.MethodGet, Path: pricingPath, Description: "查看模型价格。"},
+		{Method: http.MethodPut, Path: pricingPath, Description: "编辑模型价格。"},
+		{Method: http.MethodPost, Path: pricingSyncPath, Description: "从 Models.dev 同步模型价格。"},
 		{Method: http.MethodPost, Path: resetUsagePath},
 		{Method: http.MethodGet, Path: dashboardPath, Menu: "账号管理", Description: "管理 CPA 账号容量、当前并发和用量统计。"},
 	}}
@@ -953,6 +1086,10 @@ func managementHandle(raw []byte) ([]byte, error) {
 		}
 	case strings.HasSuffix(path, resetUsagePath):
 		resp, _ = managementResetUsage(context.Background(), pluginReq)
+	case strings.HasSuffix(path, pricingSyncPath):
+		resp, _ = managementPricingSync(context.Background(), pluginReq)
+	case strings.HasSuffix(path, pricingPath):
+		resp, _ = managementPricing(context.Background(), pluginReq)
 	case strings.HasSuffix(path, "/account-capacity/dashboard") || strings.HasSuffix(path, dashboardPath):
 		resp, _ = managementDashboard(context.Background(), pluginReq)
 	default:
@@ -1218,6 +1355,96 @@ func managementDashboard(_ context.Context, req pluginapi.ManagementRequest) (pl
 	return htmlResponse(http.StatusOK, dashboardHTML()), nil
 }
 
+func managementPricing(_ context.Context, req pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
+	switch req.Method {
+	case http.MethodGet:
+		state.mu.Lock()
+		response := pricingListResponse{Pricing: pricingViewsLocked(), Source: state.pricingSrc, UpdatedAt: state.pricingAt}
+		response.ModelCount = len(response.Pricing)
+		state.mu.Unlock()
+		return jsonResponse(http.StatusOK, response), nil
+	case http.MethodPut:
+		var input pricingUpdateRequest
+		if err := json.Unmarshal(req.Body, &input); err != nil {
+			return jsonResponse(http.StatusBadRequest, map[string]string{"error": "请求体不是有效 JSON"}), nil
+		}
+		input.Model = strings.TrimSpace(input.Model)
+		if input.Model == "" || input.PriceMultiplier < 0 || math.IsNaN(input.PriceMultiplier) || math.IsInf(input.PriceMultiplier, 0) || !validPrice(modelPrice{Input: input.PromptPricePer1M, Output: input.CompletionPricePer1M, CacheRead: input.CacheReadPricePer1M, CacheWrite: input.CacheWritePricePer1M}) {
+			return jsonResponse(http.StatusBadRequest, map[string]string{"error": "模型和价格必须有效，价格不能为负数"}), nil
+		}
+		if input.PriceMultiplier == 0 {
+			input.PriceMultiplier = 1
+		}
+		state.mu.Lock()
+		price := modelPrice{Input: input.PromptPricePer1M, Output: input.CompletionPricePer1M, CacheRead: input.CacheReadPricePer1M, CacheWrite: input.CacheWritePricePer1M, Multiplier: input.PriceMultiplier}
+		putPriceAliasesLocked(input.Model, price)
+		upsertPricingItemLocked(pricingEntry{Model: input.Model, Price: price, PricingStyle: "OpenAI"})
+		snapshot := pricingSnapshot{UpdatedAt: state.pricingAt, Source: state.pricingSrc, Models: state.pricing, Entries: state.pricingItems}
+		if snapshot.UpdatedAt.IsZero() {
+			snapshot.UpdatedAt = time.Now().UTC()
+		}
+		err := savePricingFile(state.cfg.PricingFile, snapshot)
+		response := pricingListResponse{Pricing: pricingViewsLocked(), Source: state.pricingSrc, UpdatedAt: snapshot.UpdatedAt}
+		response.ModelCount = len(response.Pricing)
+		state.mu.Unlock()
+		if err != nil {
+			return jsonResponse(http.StatusInternalServerError, map[string]string{"error": err.Error()}), nil
+		}
+		return jsonResponse(http.StatusOK, response), nil
+	default:
+		return jsonResponse(http.StatusMethodNotAllowed, nil), nil
+	}
+}
+
+func managementPricingSync(_ context.Context, req pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
+	if req.Method != http.MethodPost {
+		return jsonResponse(http.StatusMethodNotAllowed, nil), nil
+	}
+	if err := refreshPricingNow(currentConfig(), true); err != nil {
+		return jsonResponse(http.StatusBadGateway, map[string]string{"error": "同步 Models.dev 价格失败: " + err.Error()}), nil
+	}
+	state.mu.Lock()
+	response := pricingListResponse{Pricing: pricingViewsLocked(), Source: state.pricingSrc, UpdatedAt: state.pricingAt}
+	response.ModelCount = len(response.Pricing)
+	state.mu.Unlock()
+	return jsonResponse(http.StatusOK, response), nil
+}
+
+func pricingViewsLocked() []pricingView {
+	items := state.pricingItems
+	if len(items) == 0 {
+		items = pricingItemsFromMap(state.pricing)
+	}
+	result := make([]pricingView, 0, len(items))
+	for _, item := range items {
+		multiplier := item.Price.Multiplier
+		if multiplier == 0 {
+			multiplier = 1
+		}
+		result = append(result, pricingView{Model: item.Model, Provider: item.Provider, PricingStyle: item.PricingStyle, PromptPricePer1M: item.Price.Input, CompletionPricePer1M: item.Price.Output, CacheReadPricePer1M: item.Price.CacheRead, CacheWritePricePer1M: item.Price.CacheWrite, PriceMultiplier: multiplier})
+	}
+	sort.Slice(result, func(i, j int) bool { return strings.ToLower(result[i].Model) < strings.ToLower(result[j].Model) })
+	return result
+}
+
+func upsertPricingItemLocked(item pricingEntry) {
+	for i := range state.pricingItems {
+		if strings.EqualFold(state.pricingItems[i].Model, item.Model) {
+			state.pricingItems[i] = item
+			return
+		}
+	}
+	state.pricingItems = append(state.pricingItems, item)
+}
+
+func putPriceAliasesLocked(model string, price modelPrice) {
+	for _, key := range []string{model, stripModelPrefix(model), normalizeModelKey(model), normalizeModelKey(stripModelPrefix(model))} {
+		if key != "" {
+			state.pricing[strings.ToLower(key)] = price
+		}
+	}
+}
+
 func buildAccountsResponse(entries []pluginapi.HostAuthFileEntry) accountsResponse {
 	state.mu.Lock()
 	defer state.mu.Unlock()
@@ -1346,10 +1573,14 @@ func (s *runtimeState) accountCostLocked(authID string) (float64, bool) {
 		if normalInput < 0 {
 			normalInput = 0
 		}
-		total += (float64(normalInput)/1_000_000)*price.Input +
+		multiplier := price.Multiplier
+		if multiplier == 0 {
+			multiplier = 1
+		}
+		total += multiplier * ((float64(normalInput)/1_000_000)*price.Input +
 			(float64(cacheRead)/1_000_000)*price.CacheRead +
 			(float64(cacheWrite)/1_000_000)*price.CacheWrite +
-			(float64(maxInt64(usage.OutputTokens, 0))/1_000_000)*price.Output
+			(float64(maxInt64(usage.OutputTokens, 0))/1_000_000)*price.Output)
 	}
 	return total, true
 }

@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"math"
 	"net/http"
@@ -42,6 +43,7 @@ func resetTestState(t *testing.T) {
 	state.pending = nil
 	state.requests = make(map[string]string)
 	state.pricing = make(map[string]modelPrice)
+	state.pricingItems = make([]pricingEntry, 0)
 	state.pricingAt = time.Time{}
 	state.pricingSrc = ""
 	state.usageByModel = make(map[string]map[string]tokenUsage)
@@ -171,6 +173,82 @@ func TestKeeperPricingChargesUncachedAndCacheSegments(t *testing.T) {
 	want := 0.7*3 + 0.2*0.3 + 0.1*3.75 + 0.5*15
 	if math.Abs(got-want) > 1e-12 {
 		t.Fatalf("cost = %.12f, want %.12f", got, want)
+	}
+}
+
+func TestPricingMultiplierChangesCost(t *testing.T) {
+	resetTestState(t)
+	state.mu.Lock()
+	state.pricing = map[string]modelPrice{"gpt-5": {Input: 2, Output: 4, Multiplier: 1.5}}
+	state.mu.Unlock()
+
+	recordRaw, err := json.Marshal(pluginapi.UsageRecord{AuthID: "a", Model: "gpt-5", Detail: pluginapi.UsageDetail{InputTokens: 1_000_000, OutputTokens: 500_000}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := usageHandle(recordRaw); err != nil {
+		t.Fatal(err)
+	}
+	state.mu.Lock()
+	got := state.usage["a"].CostUSD
+	state.mu.Unlock()
+	if want := 1.5 * (2 + 0.5*4); math.Abs(got-want) > 1e-12 {
+		t.Fatalf("cost = %.12f, want %.12f", got, want)
+	}
+}
+
+func TestPricingManagementSavesManualPrice(t *testing.T) {
+	resetTestState(t)
+	path := filepath.Join(t.TempDir(), "pricing.json")
+	state.mu.Lock()
+	state.cfg.PricingFile = path
+	state.pricingSrc = "https://models.dev/api.json"
+	state.mu.Unlock()
+
+	body, err := json.Marshal(pricingUpdateRequest{Model: "custom-model", PromptPricePer1M: 1.25, CompletionPricePer1M: 3.5, CacheReadPricePer1M: 0.2, CacheWritePricePer1M: 2, PriceMultiplier: 1.8})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := managementPricing(context.Background(), pluginapi.ManagementRequest{Method: http.MethodPut, Body: body})
+	if err != nil || response.StatusCode != http.StatusOK {
+		t.Fatalf("save response = %#v, err=%v", response, err)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var snapshot pricingSnapshot
+	if err := json.Unmarshal(data, &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	if got := snapshot.Models["custom-model"]; got.Multiplier != 1.8 || got.Input != 1.25 {
+		t.Fatalf("saved price = %#v", got)
+	}
+}
+
+func TestPricingManagementRejectsNegativeMultiplier(t *testing.T) {
+	resetTestState(t)
+	body, err := json.Marshal(pricingUpdateRequest{Model: "bad", PriceMultiplier: -1})
+	if err != nil {
+		t.Fatal(err)
+	}
+	response, err := managementPricing(context.Background(), pluginapi.ManagementRequest{Method: http.MethodPut, Body: body})
+	if err != nil || response.StatusCode != http.StatusBadRequest {
+		t.Fatalf("response = %#v, err=%v", response, err)
+	}
+}
+
+func TestPricingRefreshForceBypassesInterval(t *testing.T) {
+	resetTestState(t)
+	updated := time.Now().UTC()
+	if pricingRefreshDue(updated, 24, false) {
+		t.Fatal("regular refresh should wait within the refresh interval")
+	}
+	if !pricingRefreshDue(updated, 24, true) {
+		t.Fatal("forced refresh should bypass the refresh interval")
+	}
+	if !pricingRefreshDue(time.Time{}, 24, false) {
+		t.Fatal("missing update time should trigger a refresh")
 	}
 }
 

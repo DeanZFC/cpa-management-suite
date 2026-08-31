@@ -1,6 +1,6 @@
 # CPA Management Suite
 
-这是一个面向 CLIProxyAPI 的公共管理套件插件。当前提供账号管理：按认证账号设置最大并发容量，并提供请求、Token 和费用统计；后续可继续扩展其他管理模块。
+这是一个面向 CLIProxyAPI 的公共管理套件插件。当前提供账号管理和模型价格管理：按认证账号设置最大并发容量，并提供请求、Token 和费用统计；后续可继续扩展其他管理模块。
 
 ## 能力
 
@@ -12,8 +12,9 @@
 - 新增/编辑通过 CPA SDK 的 `host.auth.save` 和 `host.auth.get` 完成，保存后由 CPA 自动重新加载认证文件。
 - 状态 JSON 和价格快照原子写入，放在插件挂载目录中，容器更新不会丢失。
 - 费用规则参考 CPA Usage Keeper：从 Models.dev 同步模型价格，分别计算普通输入、缓存读取、缓存写入和输出。
+- 管理页面的“模型价格”模块支持查看、搜索、手动修改和新增模型价格，也支持点击“同步价格”强制从 Models.dev 拉取最新价格；同步和手动修改都会持久化到价格快照。
 
-页面顶部使用模块菜单布局，当前仅启用“账号管理”。后续模块可以在不改变现有账号管理接口的情况下继续加入。
+页面顶部使用模块菜单布局，当前包含“账号管理”和“模型价格”。切换到“模型价格”后点击“同步价格”即可立即拉取价格，不受自动刷新间隔限制；也可以直接编辑表格中的价格后保存。
 
 ## 构建 Linux amd64
 
@@ -76,7 +77,7 @@ plugins:
 
 CPA 的 `UsageRecord` 只提供 Token，不提供统一费用字段。插件会读取 Models.dev 的模型价格目录并保存本地快照；模型未匹配到价格时，该请求费用为 0。价格单位与 Keeper 一致，为 USD/百万 Token。
 
-费用计算与 Keeper 一致：普通输入为 `max(input - cache_read - cache_creation, 0)`，再分别乘以普通输入、缓存读取、缓存写入和输出价格。插件启动时加载本地快照，并每小时检查一次，快照超过 `pricing_refresh_hours` 后自动更新。
+费用计算与 Keeper 一致：普通输入为 `max(input - cache_read - cache_creation, 0)`，再分别乘以普通输入、缓存读取、缓存写入和输出价格，最后乘以模型倍率。插件启动时加载本地快照，并每小时检查一次，快照超过 `pricing_refresh_hours` 后自动更新。价格同步失败时继续使用本地快照。
 
 `state_file` 和 `pricing_file` 是高级路径配置，默认自动放在 `/CLIProxyAPI/plugins/` 下，正常使用不需要填写。通过页面保存配置时，留空的高级路径仍会回退到默认值。
 
@@ -116,6 +117,14 @@ PUT  /v0/management/account-capacity/accounts/auth         # 编辑并覆盖认�
 ```
 
 当前 CPA 插件 SDK 没有提供删除认证文件的 `host.auth.delete` 回调，因此页面的“停用”是安全的逻辑停用；不会提供可能造成误删的伪删除按钮。物理删除仍应使用 CPA 自带的认证文件管理页面。
+
+模型价格接口：
+
+```text
+GET  /v0/management/account-capacity/pricing             # 读取价格
+PUT  /v0/management/account-capacity/pricing             # 保存或新增单个模型价格
+POST /v0/management/account-capacity/pricing/sync       # 强制同步 Models.dev
+```
 
 ## 注意
 
