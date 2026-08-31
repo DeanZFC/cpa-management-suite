@@ -66,7 +66,7 @@ import (
 
 const (
 	pluginID        = "cpa-management-suite"
-	pluginVersion   = "0.5.0"
+	pluginVersion   = "0.6.0"
 	dashboardPath   = "/dashboard"
 	accountsPath    = "/account-capacity/accounts"
 	authAccountPath = "/account-capacity/accounts/auth"
@@ -218,6 +218,17 @@ type tokenUsage struct {
 	CacheCreateTokens int64 `json:"cache_creation_tokens"`
 }
 
+type usageModelView struct {
+	Provider          string  `json:"provider,omitempty"`
+	Model             string  `json:"model"`
+	InputTokens       int64   `json:"input_tokens"`
+	OutputTokens      int64   `json:"output_tokens"`
+	CacheReadTokens   int64   `json:"cache_read_tokens"`
+	CacheCreateTokens int64   `json:"cache_creation_tokens"`
+	TotalTokens       int64   `json:"total_tokens"`
+	CostUSD           float64 `json:"cost_usd"`
+}
+
 type persistedState struct {
 	Accounts     map[string]accountConfig         `json:"accounts"`
 	Usage        map[string]usageStats            `json:"usage"`
@@ -323,31 +334,36 @@ type managementRoute struct {
 }
 
 type accountView struct {
-	ID            string     `json:"id"`
-	AuthIndex     string     `json:"auth_index,omitempty"`
-	Name          string     `json:"name"`
-	Label         string     `json:"label,omitempty"`
-	Email         string     `json:"email,omitempty"`
-	Provider      string     `json:"provider"`
-	Type          string     `json:"type,omitempty"`
-	Status        string     `json:"status,omitempty"`
-	StatusMessage string     `json:"status_message,omitempty"`
-	Disabled      bool       `json:"disabled"`
-	Unavailable   bool       `json:"unavailable"`
-	Capacity      int        `json:"capacity"`
-	Enabled       bool       `json:"enabled"`
-	RuntimeOnly   bool       `json:"runtime_only"`
-	Source        string     `json:"source,omitempty"`
-	Path          string     `json:"path,omitempty"`
-	ProjectID     string     `json:"project_id,omitempty"`
-	AccountType   string     `json:"account_type,omitempty"`
-	Account       string     `json:"account,omitempty"`
-	Priority      int        `json:"priority,omitempty"`
-	Note          string     `json:"note,omitempty"`
-	Websockets    bool       `json:"websockets"`
-	UpdatedAt     time.Time  `json:"updated_at,omitempty"`
-	Active        int        `json:"active"`
-	Usage         usageStats `json:"usage"`
+	ID             string                             `json:"id"`
+	AuthIndex      string                             `json:"auth_index,omitempty"`
+	Name           string                             `json:"name"`
+	Label          string                             `json:"label,omitempty"`
+	Email          string                             `json:"email,omitempty"`
+	Provider       string                             `json:"provider"`
+	Type           string                             `json:"type,omitempty"`
+	Status         string                             `json:"status,omitempty"`
+	StatusMessage  string                             `json:"status_message,omitempty"`
+	Disabled       bool                               `json:"disabled"`
+	Unavailable    bool                               `json:"unavailable"`
+	Capacity       int                                `json:"capacity"`
+	Enabled        bool                               `json:"enabled"`
+	RuntimeOnly    bool                               `json:"runtime_only"`
+	Source         string                             `json:"source,omitempty"`
+	Path           string                             `json:"path,omitempty"`
+	ProjectID      string                             `json:"project_id,omitempty"`
+	AccountType    string                             `json:"account_type,omitempty"`
+	Account        string                             `json:"account,omitempty"`
+	Priority       int                                `json:"priority,omitempty"`
+	Note           string                             `json:"note,omitempty"`
+	Websockets     bool                               `json:"websockets"`
+	UpdatedAt      time.Time                          `json:"updated_at,omitempty"`
+	CreatedAt      time.Time                          `json:"created_at,omitempty"`
+	LastRefresh    time.Time                          `json:"last_refresh,omitempty"`
+	NextRetryAfter time.Time                          `json:"next_retry_after,omitempty"`
+	Active         int                                `json:"active"`
+	Usage          usageStats                         `json:"usage"`
+	UsageByModel   []usageModelView                   `json:"usage_by_model,omitempty"`
+	RecentRequests []pluginapi.HostRecentRequestEntry `json:"recent_requests,omitempty"`
 }
 
 type accountsResponse struct {
@@ -1773,7 +1789,38 @@ func buildAccountsResponse(entries []pluginapi.HostAuthFileEntry) accountsRespon
 		if dynamicCost, ok := state.accountCostLocked(id); ok {
 			usage.CostUSD = dynamicCost
 		}
-		item := accountView{ID: id, AuthIndex: entry.AuthIndex, Name: entry.Name, Label: cfg.Label, Email: entry.Email, Provider: entry.Provider, Type: entry.Type, Status: entry.Status, StatusMessage: entry.StatusMessage, Disabled: entry.Disabled, Unavailable: entry.Unavailable, Capacity: cfg.Capacity, Enabled: cfg.Enabled, RuntimeOnly: entry.RuntimeOnly, Source: entry.Source, Path: entry.Path, ProjectID: entry.ProjectID, AccountType: entry.AccountType, Account: entry.Account, Priority: entry.Priority, Note: entry.Note, Websockets: entry.Websockets, UpdatedAt: entry.UpdatedAt, Active: state.active[id], Usage: usage}
+		item := accountView{
+			ID:             id,
+			AuthIndex:      entry.AuthIndex,
+			Name:           entry.Name,
+			Label:          cfg.Label,
+			Email:          entry.Email,
+			Provider:       entry.Provider,
+			Type:           entry.Type,
+			Status:         entry.Status,
+			StatusMessage:  entry.StatusMessage,
+			Disabled:       entry.Disabled,
+			Unavailable:    entry.Unavailable,
+			Capacity:       cfg.Capacity,
+			Enabled:        cfg.Enabled,
+			RuntimeOnly:    entry.RuntimeOnly,
+			Source:         entry.Source,
+			Path:           entry.Path,
+			ProjectID:      entry.ProjectID,
+			AccountType:    entry.AccountType,
+			Account:        entry.Account,
+			Priority:       entry.Priority,
+			Note:           entry.Note,
+			Websockets:     entry.Websockets,
+			UpdatedAt:      entry.UpdatedAt,
+			CreatedAt:      entry.CreatedAt,
+			LastRefresh:    entry.LastRefresh,
+			NextRetryAfter: entry.NextRetryAfter,
+			Active:         state.active[id],
+			Usage:          usage,
+			RecentRequests: entry.RecentRequests,
+			UsageByModel:   usageModelsLocked(id),
+		}
 		if item.Label == "" {
 			item.Label = entry.Label
 		}
@@ -1874,27 +1921,56 @@ func (s *runtimeState) accountCostLocked(authID string) (float64, bool) {
 	var total float64
 	for modelKey, usage := range models {
 		provider, model := splitUsageModelKey(modelKey)
-		price, ok := lookupPriceForProvider(s.pricing, provider, model)
-		if !ok {
-			continue
-		}
-		input := maxInt64(usage.InputTokens, 0)
-		cacheRead := maxInt64(usage.CacheReadTokens, 0)
-		cacheWrite := maxInt64(usage.CacheCreateTokens, 0)
-		normalInput := input - cacheRead - cacheWrite
-		if normalInput < 0 {
-			normalInput = 0
-		}
-		multiplier := price.Multiplier
-		if multiplier == 0 {
-			multiplier = 1
-		}
-		total += multiplier * ((float64(normalInput)/1_000_000)*price.Input +
-			(float64(cacheRead)/1_000_000)*price.CacheRead +
-			(float64(cacheWrite)/1_000_000)*price.CacheWrite +
-			(float64(maxInt64(usage.OutputTokens, 0))/1_000_000)*price.Output)
+		total += costForTokenUsageLocked(provider, model, usage)
 	}
 	return total, true
+}
+
+func costForTokenUsageLocked(provider, model string, usage tokenUsage) float64 {
+	price, ok := lookupPriceForProvider(state.pricing, provider, model)
+	if !ok {
+		return 0
+	}
+	input := maxInt64(usage.InputTokens, 0)
+	cacheRead := maxInt64(usage.CacheReadTokens, 0)
+	cacheWrite := maxInt64(usage.CacheCreateTokens, 0)
+	normalInput := input - cacheRead - cacheWrite
+	if normalInput < 0 {
+		normalInput = 0
+	}
+	multiplier := price.Multiplier
+	if multiplier == 0 {
+		multiplier = 1
+	}
+	return multiplier * ((float64(normalInput)/1_000_000)*price.Input +
+		(float64(cacheRead)/1_000_000)*price.CacheRead +
+		(float64(cacheWrite)/1_000_000)*price.CacheWrite +
+		(float64(maxInt64(usage.OutputTokens, 0))/1_000_000)*price.Output)
+}
+
+func usageModelsLocked(authID string) []usageModelView {
+	models := state.usageByModel[authID]
+	result := make([]usageModelView, 0, len(models))
+	for modelKey, usage := range models {
+		provider, model := splitUsageModelKey(modelKey)
+		result = append(result, usageModelView{
+			Provider:          provider,
+			Model:             model,
+			InputTokens:       usage.InputTokens,
+			OutputTokens:      usage.OutputTokens,
+			CacheReadTokens:   usage.CacheReadTokens,
+			CacheCreateTokens: usage.CacheCreateTokens,
+			TotalTokens:       usage.InputTokens + usage.OutputTokens,
+			CostUSD:           costForTokenUsageLocked(provider, model, usage),
+		})
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].CostUSD != result[j].CostUSD {
+			return result[i].CostUSD > result[j].CostUSD
+		}
+		return strings.ToLower(result[i].Model) < strings.ToLower(result[j].Model)
+	})
+	return result
 }
 
 func (s *runtimeState) bindReservationLocked(requestID, authID string) {
