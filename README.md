@@ -52,7 +52,9 @@ services:
       - ./cliproxyapi/plugins:/CLIProxyAPI/plugins
 ```
 
-在 CPA 的 `config.yaml` 中加入或确认：
+首次安装插件时，CPA 仍需要启用插件目录；完成安装后，`default_capacity`、拒绝策略和价格同步配置可以直接在 CPAMP 的“插件管理 → 编辑配置”页面修改，不需要再登录服务器编辑配置文件。
+
+如果插件尚未被 CPA 发现，才需要在 CPA 的 `config.yaml` 中加入或确认：
 
 ```yaml
 plugins:
@@ -73,6 +75,8 @@ plugins:
 CPA 的 `UsageRecord` 只提供 Token，不提供统一费用字段。插件会读取 Models.dev 的模型价格目录并保存本地快照；模型未匹配到价格时，该请求费用为 0。价格单位与 Keeper 一致，为 USD/百万 Token。
 
 费用计算与 Keeper 一致：普通输入为 `max(input - cache_read - cache_creation, 0)`，再分别乘以普通输入、缓存读取、缓存写入和输出价格。插件启动时加载本地快照，并每小时检查一次，快照超过 `pricing_refresh_hours` 后自动更新。
+
+`state_file` 和 `pricing_file` 是高级路径配置，默认自动放在 `/CLIProxyAPI/plugins/` 下，正常使用不需要填写。通过页面保存配置时，留空的高级路径仍会回退到默认值。
 
 ## Docker 两套安装
 

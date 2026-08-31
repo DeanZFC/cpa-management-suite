@@ -12,6 +12,24 @@ import (
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
+func TestPluginRegistrationExposesPublicConfiguration(t *testing.T) {
+	registration := pluginRegistration()
+	if registration.Metadata.Name != "CPA Management Suite" {
+		t.Fatalf("plugin name = %q", registration.Metadata.Name)
+	}
+	if registration.Metadata.GitHubRepository != "https://github.com/DeanZFC/cpa-management-suite" {
+		t.Fatalf("repository = %q", registration.Metadata.GitHubRepository)
+	}
+	if len(registration.Metadata.ConfigFields) != 4 {
+		t.Fatalf("config fields = %d, want 4", len(registration.Metadata.ConfigFields))
+	}
+	for _, field := range registration.Metadata.ConfigFields {
+		if field.Name == "state_file" || field.Name == "pricing_file" {
+			t.Fatalf("internal path exposed as config field: %q", field.Name)
+		}
+	}
+}
+
 func resetTestState(t *testing.T) {
 	t.Helper()
 	state.mu.Lock()
