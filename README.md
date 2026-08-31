@@ -1,6 +1,6 @@
-# CPA Account Capacity
+# CPA Management Suite
 
-这是一个 CLIProxyAPI 原生动态库插件，按认证账号设置最大并发容量，并提供请求、Token 和费用统计。
+这是一个面向 CLIProxyAPI 的公共管理套件插件。当前提供账号管理：按认证账号设置最大并发容量，并提供请求、Token 和费用统计；后续可继续扩展其他管理模块。
 
 ## 能力
 
@@ -11,23 +11,25 @@
 - 状态 JSON 和价格快照原子写入，放在插件挂载目录中，容器更新不会丢失。
 - 费用规则参考 CPA Usage Keeper：从 Models.dev 同步模型价格，分别计算普通输入、缓存读取、缓存写入和输出。
 
+页面顶部使用模块菜单布局，当前仅启用“账号管理”。后续模块可以在不改变现有账号管理接口的情况下继续加入。
+
 ## 构建 Linux amd64
 
 插件必须使用与 CPA 匹配的 Go SDK。构建时需要准备 CPA 源码目录，并通过 `go mod edit` 指向它。假设源码目录是 `/tmp/cliproxyapi-reference`：
 
 ```bash
-cd cpa-plugin-account-capacity
+cd cpa-management-suite
 ./build-linux.sh
 ```
 
-脚本会自动准备 `/tmp/cliproxyapi-reference` 中的 CPA 源码并生成 `account-capacity.so`。也可以手动执行：
+脚本会自动准备 `/tmp/cliproxyapi-reference` 中的 CPA 源码并生成 `cpa-management-suite.so`。也可以手动执行：
 
 ```bash
 git clone --depth=1 https://github.com/router-for-me/CLIProxyAPI.git /tmp/cliproxyapi-reference
 go mod edit -replace github.com/router-for-me/CLIProxyAPI/v7=/tmp/cliproxyapi-reference
 GOOS=linux GOARCH=amd64 CGO_ENABLED=1 \
-  go build -buildmode=c-shared -o account-capacity.so .
-rm -f account-capacity.h
+  go build -buildmode=c-shared -o cpa-management-suite.so .
+rm -f cpa-management-suite.h
 ```
 
 如果 CPA 源码不在该目录，把 `go mod edit` 命令中的路径替换成实际路径。不要把 macOS 生成的 `.dylib` 放到 Linux CPA 容器中；Linux 必须生成 `.so`。构建完成后可以删除本地 `replace`：
@@ -57,7 +59,7 @@ plugins:
   enabled: true
   dir: "/CLIProxyAPI/plugins"
   configs:
-    account-capacity:
+    cpa-management-suite:
       enabled: true
       priority: 100
       state_file: "/CLIProxyAPI/plugins/account-capacity-state.json"
@@ -74,12 +76,12 @@ CPA 的 `UsageRecord` 只提供 Token，不提供统一费用字段。插件会�
 
 ## Docker 两套安装
 
-分别准备目录并复制同一个 `account-capacity.so`：
+分别准备目录并复制同一个 `cpa-management-suite.so`：
 
 ```bash
 sudo mkdir -p /root/cpa-1/cliproxyapi/plugins /root/cpa-2/cliproxyapi/plugins
-sudo cp account-capacity.so /root/cpa-1/cliproxyapi/plugins/
-sudo cp account-capacity.so /root/cpa-2/cliproxyapi/plugins/
+sudo cp cpa-management-suite.so /root/cpa-1/cliproxyapi/plugins/
+sudo cp cpa-management-suite.so /root/cpa-2/cliproxyapi/plugins/
 ```
 
 然后分别重启：
@@ -98,5 +100,7 @@ cd /root/cpa-2 && sudo docker compose up -d --force-recreate cli-proxy-api
 页面中的修改操作填写对应这一套 CPA 的 `CPA Management Key`。两套 CPA 使用各自的 `config.yaml`、插件状态文件和管理密钥，互不影响。
 
 ## 注意
+
+项目名称已从早期版本的 `CPA Account Capacity` 改为 `CPA Management Suite`。为了兼容已安装版本，管理接口和状态文件仍保留 `account-capacity` 路径及文件名。
 
 当 CPA 自身开启 Home 模式时，Home 控制平面会接管认证调度；本插件面向普通单机调度模式。插件更新时不要删除 `account-capacity-state.json`，否则会丢失容量设置和用量统计。

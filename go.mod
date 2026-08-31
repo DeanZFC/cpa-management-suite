@@ -1,4 +1,4 @@
-module github.com/DeanZFC/cpa-plugin-account-capacity
+module github.com/DeanZFC/cpa-management-suite
 
 go 1.26.0
 

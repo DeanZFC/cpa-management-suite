@@ -43,6 +43,7 @@ import "C"
 
 import (
 	"context"
+	_ "embed"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -64,7 +65,7 @@ import (
 )
 
 const (
-	pluginID       = "account-capacity"
+	pluginID       = "cpa-management-suite"
 	pluginVersion  = "0.1.0"
 	dashboardPath  = "/dashboard"
 	accountsPath   = "/account-capacity/accounts"
@@ -454,8 +455,8 @@ func pluginRegistration() registration {
 	return registration{
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{
-			Name: "Account Capacity", Version: pluginVersion, Author: "DeanZFC",
-			GitHubRepository: "https://github.com/DeanZFC/cpa-plugin-account-capacity",
+			Name: "CPA Management Suite", Version: pluginVersion, Author: "DeanZFC",
+			GitHubRepository: "https://github.com/DeanZFC/cpa-management-suite",
 			ConfigFields: []pluginapi.ConfigField{
 				{Name: "state_file", Type: pluginapi.ConfigFieldTypeString, Description: "Persistent JSON state path; keep it under the mounted plugins directory."},
 				{Name: "default_capacity", Type: pluginapi.ConfigFieldTypeInteger, Description: "Default maximum concurrent requests per account."},
@@ -898,7 +899,7 @@ func managementRegistration() managementRegistrationResponse {
 		{Method: http.MethodGet, Path: accountsPath},
 		{Method: http.MethodPut, Path: accountsPath},
 		{Method: http.MethodPost, Path: resetUsagePath},
-		{Method: http.MethodGet, Path: dashboardPath, Menu: "账号并发管理", Description: "查看账号容量、当前并发和用量统计。"},
+		{Method: http.MethodGet, Path: dashboardPath, Menu: "账号管理", Description: "管理 CPA 账号容量、当前并发和用量统计。"},
 	}}
 }
 
@@ -1255,7 +1256,12 @@ func htmlResponse(status int, body string) pluginapi.ManagementResponse {
 	return pluginapi.ManagementResponse{StatusCode: status, Headers: http.Header{"content-type": []string{"text/html; charset=utf-8"}}, Body: []byte(body)}
 }
 
-func dashboardHTML() string {
+//go:embed dashboard.html
+var dashboardHTMLTemplate string
+
+func dashboardHTML() string { return dashboardHTMLTemplate }
+
+func legacyDashboardHTML() string {
 	return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CPA 账号并发管理</title><style>
 :root{color-scheme:dark;--bg:#101418;--panel:#171d23;--line:#2a333c;--text:#edf2f7;--muted:#98a6b5;--accent:#56c596;--danger:#ff8f8f}*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--text);font:14px system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif}main{max-width:1500px;margin:0 auto;padding:28px}.top{display:flex;gap:12px;align-items:end;justify-content:space-between;flex-wrap:wrap}.title h1{margin:0 0 6px;font-size:24px}.title p{margin:0;color:var(--muted)}.controls{display:flex;gap:8px;flex-wrap:wrap}.controls input{min-width:310px}.input,button{border:1px solid var(--line);border-radius:6px;background:#11171c;color:var(--text);padding:9px 11px;font:inherit}button{cursor:pointer;background:#20352e;border-color:#316b55}button:hover{background:#29483d}.stats{display:grid;grid-template-columns:repeat(6,minmax(120px,1fr));gap:10px;margin:24px 0}.stat{background:var(--panel);border:1px solid var(--line);padding:15px}.stat b{display:block;font-size:21px;margin-top:5px}.stat span{color:var(--muted);font-size:12px}.table-wrap{overflow:auto;border:1px solid var(--line);background:var(--panel)}table{width:100%;border-collapse:collapse;min-width:1100px}th,td{text-align:left;border-bottom:1px solid var(--line);padding:12px 10px;white-space:nowrap}th{color:var(--muted);font-size:12px;font-weight:500}td small{display:block;color:var(--muted);margin-top:3px}.pill{display:inline-block;padding:3px 7px;border-radius:4px;background:#234e3d;color:#a6ebc9;font-size:12px}.off{background:#493333;color:#ffc0c0}.muted{color:var(--muted)}.err{color:var(--danger);margin-top:12px;white-space:pre-wrap}@media(max-width:900px){main{padding:18px}.stats{grid-template-columns:repeat(2,1fr)}.controls input{min-width:220px}}
 </style></head><body><main><div class="top"><div class="title"><h1>CPA 账号并发管理</h1><p>容量 = 单个认证账号允许的最大同时请求数；费用按 Models.dev 价格表计算</p></div><div class="controls"><input id="key" class="input" type="password" placeholder="CPA Management Key"><button onclick="loadData()">刷新</button><button onclick="resetUsage()">清空用量</button></div></div><div id="err" class="err"></div><section id="stats" class="stats"></section><div class="table-wrap"><table><thead><tr><th>账号</th><th>平台</th><th>状态</th><th>容量</th><th>当前并发</th><th>请求</th><th>成功率</th><th>Token</th><th>费用</th><th>操作</th></tr></thead><tbody id="rows"><tr><td colspan="10" class="muted">请输入 CPA Management Key 后刷新</td></tr></tbody></table></div></main><script>

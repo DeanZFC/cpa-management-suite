@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 CPA_SRC=${CPA_SRC:-/tmp/cliproxyapi-reference}
-OUTPUT=${OUTPUT:-"$ROOT_DIR/account-capacity.so"}
+OUTPUT=${OUTPUT:-"$ROOT_DIR/cpa-management-suite.so"}
 
 if [[ ! -f "$CPA_SRC/go.mod" ]]; then
   mkdir -p "$(dirname "$CPA_SRC")"

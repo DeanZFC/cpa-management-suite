@@ -1,4 +1,4 @@
-name: Build CPA account capacity plugin
+name: Build CPA Management Suite plugin
 
 on:
   push:
@@ -27,11 +27,11 @@ jobs:
       - name: Build Linux amd64 plugin
         run: |
           CGO_ENABLED=1 GOOS=linux GOARCH=amd64 \
-            go build -buildmode=c-shared -trimpath -o account-capacity.so .
-          rm -f account-capacity.h
+            go build -buildmode=c-shared -trimpath -o cpa-management-suite.so .
+          rm -f cpa-management-suite.h
 
       - name: Upload plugin artifact
         uses: actions/upload-artifact@v4
         with:
-          name: account-capacity-linux-amd64
-          path: account-capacity.so
+          name: cpa-management-suite-linux-amd64
+          path: cpa-management-suite.so
