@@ -66,7 +66,7 @@ import (
 
 const (
 	pluginID        = "cpa-management-suite"
-	pluginVersion   = "0.3.0"
+	pluginVersion   = "0.4.0"
 	dashboardPath   = "/dashboard"
 	accountsPath    = "/account-capacity/accounts"
 	authAccountPath = "/account-capacity/accounts/auth"
@@ -95,6 +95,7 @@ type lifecycleRequest struct {
 
 type config struct {
 	Enabled             bool   `yaml:"enabled"`
+	CPAManagementKey    string `yaml:"cpa_management_key"`
 	StateFile           string `yaml:"state_file"`
 	DefaultCapacity     int    `yaml:"default_capacity"`
 	RejectWhenFull      bool   `yaml:"reject_when_full"`
@@ -526,6 +527,7 @@ func pluginRegistration() registration {
 			Name: "CPA Management Suite", Version: pluginVersion, Author: "DeanZFC",
 			GitHubRepository: "https://github.com/DeanZFC/cpa-management-suite",
 			ConfigFields: []pluginapi.ConfigField{
+				{Name: "cpa_management_key", Type: pluginapi.ConfigFieldTypeString, Description: "CPA Management Key；页面会使用此密钥访问 CPA 管理接口，请勿分享插件页面。"},
 				{Name: "default_capacity", Type: pluginapi.ConfigFieldTypeInteger, Description: "默认每个账号的最大并发数；单个账号可在账号管理页面单独调整。"},
 				{Name: "reject_when_full", Type: pluginapi.ConfigFieldTypeBoolean, Description: "所有可用账号达到容量时返回 429，而不是交给 CPA 继续选择。"},
 				{Name: "pricing_url", Type: pluginapi.ConfigFieldTypeString, Description: "模型价格目录地址；留空使用 Models.dev。"},
@@ -1717,7 +1719,13 @@ func htmlResponse(status int, body string) pluginapi.ManagementResponse {
 //go:embed dashboard.html
 var dashboardHTMLTemplate string
 
-func dashboardHTML() string { return dashboardHTMLTemplate }
+func dashboardHTML() string {
+	state.mu.Lock()
+	key := state.cfg.CPAManagementKey
+	state.mu.Unlock()
+	keyJSON, _ := json.Marshal(key)
+	return strings.ReplaceAll(dashboardHTMLTemplate, "__CPA_MANAGEMENT_KEY_JSON__", string(keyJSON))
+}
 
 func legacyDashboardHTML() string {
 	return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>CPA 账号并发管理</title><style>

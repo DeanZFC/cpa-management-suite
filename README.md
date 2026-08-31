@@ -55,7 +55,7 @@ services:
       - ./cliproxyapi/plugins:/CLIProxyAPI/plugins
 ```
 
-首次安装插件时，CPA 仍需要启用插件目录；完成安装后，`default_capacity`、拒绝策略和价格同步配置可以直接在 CPAMP 的“插件管理 → 编辑配置”页面修改，不需要再登录服务器编辑配置文件。
+首次安装插件时，CPA 仍需要启用插件目录；完成安装后，CPA Management Key、`default_capacity`、拒绝策略和价格同步配置可以直接在 CPAMP 的“插件管理 → 编辑配置”页面修改，不需要再登录服务器编辑配置文件。
 
 如果插件尚未被 CPA 发现，才需要在 CPA 的 `config.yaml` 中加入或确认：
 
@@ -66,6 +66,7 @@ plugins:
   configs:
     cpa-management-suite:
       enabled: true
+      cpa_management_key: ""
       priority: 100
       state_file: "/CLIProxyAPI/plugins/account-capacity-state.json"
       pricing_file: "/CLIProxyAPI/plugins/account-capacity-pricing.json"
@@ -98,13 +99,15 @@ cd /root/cpa-1 && sudo docker compose up -d --force-recreate cli-proxy-api
 cd /root/cpa-2 && sudo docker compose up -d --force-recreate cli-proxy-api
 ```
 
-管理页面在 CPA 管理页面的插件菜单中打开，或直接访问：
+管理页面在 CPA 管理页面的插件菜单中打开，或直接访问。CPA Management Key 在 CPA 的“插件管理 → CPA Management Suite → 编辑配置”中填写，页面顶部不再显示密钥输入框：
 
 ```text
-/v0/resource/plugins/account-capacity/dashboard
+/v0/resource/plugins/cpa-management-suite/dashboard
 ```
 
-页面中的修改操作填写对应这一套 CPA 的 `CPA Management Key`。两套 CPA 使用各自的 `config.yaml`、插件状态文件和管理密钥，互不影响。
+页面中的修改操作使用当前插件配置中的 `CPA Management Key`。两套 CPA 使用各自的 `config.yaml`、插件状态文件和管理密钥，互不影响。
+
+`cpa_management_key` 会由插件注入管理页面，用于浏览器调用 CPA 的管理接口。它属于敏感配置，请只允许可信用户访问插件页面，不要提交到 GitHub 或公开截图。
 
 账号管理接口：
 
