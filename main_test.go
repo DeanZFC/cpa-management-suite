@@ -16,30 +16,30 @@ import (
 
 func TestPluginRegistrationExposesPublicConfiguration(t *testing.T) {
 	registration := pluginRegistration()
-	if registration.Metadata.Name != "CPA Management Suite" {
+	if registration.Metadata.Name != "CPA-A Manager" {
 		t.Fatalf("plugin name = %q", registration.Metadata.Name)
 	}
 	if registration.Metadata.GitHubRepository != "https://github.com/DeanZFC/cpa-management-suite" {
 		t.Fatalf("repository = %q", registration.Metadata.GitHubRepository)
 	}
-	if len(registration.Metadata.ConfigFields) != 5 {
-		t.Fatalf("config fields = %d, want 5", len(registration.Metadata.ConfigFields))
+	if len(registration.Metadata.ConfigFields) != 4 {
+		t.Fatalf("config fields = %d, want 4", len(registration.Metadata.ConfigFields))
 	}
 	for _, field := range registration.Metadata.ConfigFields {
-		if field.Name == "state_file" || field.Name == "pricing_file" {
+		if field.Name == "state_file" || field.Name == "pricing_file" || field.Name == "cpa_management_key" {
 			t.Fatalf("internal path exposed as config field: %q", field.Name)
 		}
 	}
 }
 
-func TestDashboardInjectsConfiguredManagementKey(t *testing.T) {
+func TestDashboardDoesNotEmbedManagementKey(t *testing.T) {
 	resetTestState(t)
 	state.mu.Lock()
 	state.cfg.CPAManagementKey = "test-management-key"
 	state.mu.Unlock()
 	html := dashboardHTML()
-	if strings.Contains(html, "__CPA_MANAGEMENT_KEY_JSON__") || !strings.Contains(html, `const configuredManagementKey="test-management-key"`) {
-		t.Fatalf("dashboard did not inject configured key")
+	if strings.Contains(html, "test-management-key") || strings.Contains(html, "__CPA_MANAGEMENT_KEY_JSON__") {
+		t.Fatalf("dashboard embedded the management key")
 	}
 }
 

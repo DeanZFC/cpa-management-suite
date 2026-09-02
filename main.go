@@ -66,8 +66,9 @@ import (
 
 const (
 	pluginID        = "cpa-management-suite"
-	pluginVersion   = "0.6.0"
+	pluginVersion   = "0.8.0"
 	dashboardPath   = "/dashboard"
+	settingsPath    = "/settings"
 	accountsPath    = "/account-capacity/accounts"
 	authAccountPath = "/account-capacity/accounts/auth"
 	pricingPath     = "/account-capacity/pricing"
@@ -557,10 +558,9 @@ func pluginRegistration() registration {
 	return registration{
 		SchemaVersion: pluginabi.SchemaVersion,
 		Metadata: pluginapi.Metadata{
-			Name: "CPA Management Suite", Version: pluginVersion, Author: "DeanZFC",
+			Name: "CPA-A Manager", Version: pluginVersion, Author: "DeanZFC",
 			GitHubRepository: "https://github.com/DeanZFC/cpa-management-suite",
 			ConfigFields: []pluginapi.ConfigField{
-				{Name: "cpa_management_key", Type: pluginapi.ConfigFieldTypeString, Description: "CPA Management Key；页面会使用此密钥访问 CPA 管理接口，请勿分享插件页面。"},
 				{Name: "default_capacity", Type: pluginapi.ConfigFieldTypeInteger, Description: "默认每个账号的最大并发数；单个账号可在账号管理页面单独调整。"},
 				{Name: "reject_when_full", Type: pluginapi.ConfigFieldTypeBoolean, Description: "所有可用账号达到容量时返回 429，而不是交给 CPA 继续选择。"},
 				{Name: "pricing_url", Type: pluginapi.ConfigFieldTypeString, Description: "模型价格目录地址；留空使用 Models.dev。"},
@@ -1315,6 +1315,7 @@ func managementRegistration() managementRegistrationResponse {
 		{Method: http.MethodPost, Path: pricingSyncPath, Description: "从 Models.dev 同步模型价格。"},
 		{Method: http.MethodPost, Path: resetUsagePath},
 		{Method: http.MethodGet, Path: dashboardPath, Menu: "账号管理", Description: "管理 CPA 账号容量、当前并发和用量统计。"},
+		{Method: http.MethodGet, Path: settingsPath, Menu: "插件设置", Description: "配置当前浏览器访问 CPA 所需的管理密钥。"},
 	}}
 }
 
@@ -1345,6 +1346,8 @@ func managementHandle(raw []byte) ([]byte, error) {
 		resp, _ = managementPricing(context.Background(), pluginReq)
 	case strings.HasSuffix(path, "/account-capacity/dashboard") || strings.HasSuffix(path, dashboardPath):
 		resp, _ = managementDashboard(context.Background(), pluginReq)
+	case strings.HasSuffix(path, settingsPath):
+		resp, _ = managementSettings(context.Background(), pluginReq)
 	default:
 		resp = jsonResponse(http.StatusNotFound, map[string]string{"error": "not found"})
 	}
@@ -1606,6 +1609,13 @@ func managementDashboard(_ context.Context, req pluginapi.ManagementRequest) (pl
 		return htmlResponse(http.StatusMethodNotAllowed, "方法不允许"), nil
 	}
 	return htmlResponse(http.StatusOK, dashboardHTML()), nil
+}
+
+func managementSettings(_ context.Context, req pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
+	if req.Method != http.MethodGet {
+		return htmlResponse(http.StatusMethodNotAllowed, "方法不允许"), nil
+	}
+	return htmlResponse(http.StatusOK, dashboardHTMLForView("settingsView")), nil
 }
 
 func managementPricing(_ context.Context, req pluginapi.ManagementRequest) (pluginapi.ManagementResponse, error) {
@@ -2106,11 +2116,12 @@ func htmlResponse(status int, body string) pluginapi.ManagementResponse {
 var dashboardHTMLTemplate string
 
 func dashboardHTML() string {
-	state.mu.Lock()
-	key := state.cfg.CPAManagementKey
-	state.mu.Unlock()
-	keyJSON, _ := json.Marshal(key)
-	return strings.ReplaceAll(dashboardHTMLTemplate, "__CPA_MANAGEMENT_KEY_JSON__", string(keyJSON))
+	return dashboardHTMLForView("accountsView")
+}
+
+func dashboardHTMLForView(initialView string) string {
+	viewJSON, _ := json.Marshal(initialView)
+	return strings.ReplaceAll(dashboardHTMLTemplate, "__CPA_INITIAL_VIEW__", string(viewJSON))
 }
 
 func legacyDashboardHTML() string {
